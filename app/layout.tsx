@@ -1,21 +1,21 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const geistSans = Geist({
+// Optimization: Using the single variable font file ([wght]) avoids 
+// loading multiple static files, reducing fetch time and network overhead.
+const geistSans = localFont({
+  src: "./fonts/Geist[wght].woff2",
   variable: "--font-geist-sans",
-  subsets: ["latin"],
+  weight: "100 900",
 });
 
-const geistMono = Geist_Mono({
+// Remove this block if you do not have the Mono font file
+const geistMono = localFont({
+  src: "./fonts/Geist[wght].woff2", // Ensure this file exists in your fonts folder
   variable: "--font-geist-mono",
-  subsets: ["latin"],
+  weight: "100 900",
 });
-
-export const metadata: Metadata = {
-  title: "Cobra2.0",
-  description: "Made easy",
-};
 
 export default function RootLayout({
   children,
@@ -24,9 +24,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
         {children}
       </body>
     </html>
