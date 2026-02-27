@@ -2562,24 +2562,34 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                 <h3 className="font-bold text-[#51534a]">Composition Ingredients</h3>
                                 <span className="text-xs text-[#968C83]">{result.composition.length} Batches</span>
                             </div>
-                            <table className="w-full text-sm text-left">
-                                <thead className="bg-[#51534a] text-white font-medium">
-                                    <tr>
-                                        <th className="py-3 px-4">Batch ID</th>
-                                        <th className="py-3 px-4">Strategy</th>
-                                        <th className="py-3 px-4 text-right">Weight ({unit})</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-[#D6D2C4]">
-                                    {result.composition.map((comp, idx) => (
-                                        <tr key={idx} className="hover:bg-[#D6D2C4]/10">
-                                            <td className="py-3 px-4 font-mono text-[#007680] font-medium">{comp.batch_number}</td>
-                                            <td className="py-3 px-4 text-[#51534a]">{comp.strategy}</td>
-                                            <td className="py-3 px-4 text-right font-medium text-[#51534a]">{formatNumber(convertQty(comp.quantityKg, unit), 0)}</td>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="bg-[#51534a] text-white font-medium">
+                                        <tr>
+                                            <th className="py-3 px-4">Batch ID</th>
+                                            <th className="py-3 px-4">Strategy</th>
+                                            <th className="py-3 px-4 text-right">Price ($/50)</th>
+                                            <th className="py-3 px-4 text-right">Hedge (c/lb)</th>
+                                            <th className="py-3 px-4 text-right">Weight ({unit})</th>
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
+                                    </thead>
+                                    <tbody className="divide-y divide-[#D6D2C4]">
+                                        {result.composition.map((comp: any, idx: number) => (
+                                            <tr key={idx} className="hover:bg-[#D6D2C4]/10">
+                                                <td className="py-3 px-4 font-mono text-[#007680] font-medium">{comp.batch_number}</td>
+                                                <td className="py-3 px-4 text-[#51534a]">{comp.strategy}</td>
+                                                <td className="py-3 px-4 text-right text-[#51534a]">
+                                                    {comp.outrightPrice50kg}
+                                                </td>
+                                                <td className="py-3 px-4 text-right text-[#51534a]">
+                                                    {comp.hedgeLevelUSClb}
+                                                </td>
+                                                <td className="py-3 px-4 text-right font-medium text-[#51534a]">{formatNumber(convertQty(comp.quantityKg, unit), 0)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
                         </Card>
                     ) : (
                          <div className="text-center p-8 border-2 border-dashed border-[#D6D2C4] rounded-xl text-[#968C83]">

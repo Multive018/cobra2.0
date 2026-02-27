@@ -20,13 +20,12 @@ const STRATEGY_VALOS: Record<string, number> = {
     "PB FAQ": 20.0,
     "AB FAQ": 20.0,
     "ABC FAQ": 15.0,
-    "GRINDERS": -25.0,
+    "GRINDER BOLD": -25.0,
+    "GRINDER RC": 0,
+    "GRINDER LIGHT": -70.0,
     "REJECTS": -270.0,
     "MBUNIS": -25.0,
-    "GRINDER BOLD": -25.0, 
-    "GRINDER RC": 0, 
-    "GRINDER LIGHT": -70.0,
-    "WASTE": 0.45359,
+    "WASTE":-270
 };
 
 const STRATEGY_MAPPING: Record<string, string[]> = {
@@ -967,6 +966,7 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
     const processes = await query<DailyProcessRow[]>({
         query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
     });
+    console.log("Succesfully fetched unpriced processes")
 
     if (processes && processes.length > 0) {
         for (const process of processes) {
@@ -1003,6 +1003,101 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
     return skippedProcessNumbers;
 }
 
+
+export async function update_post_trade_variables_unorthodox(): Promise<string[]> {
+    console.log("Starting update_post_trade_variables process (DB-Driven Mode).");
+    const skippedProcessNumbers: string[] = [];
+
+    // --- 1. PHASE 1: Chronological Processing with "Push" ---
+    // Optimization: Fetch all pending processes at once ordered by date to ensure correct dependency flow.
+    console.log("\n--- Starting Phase 1: Chronological Push Processing ---");
+    const processes = await query<DailyProcessRow[]>({
+        query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
+    });
+
+    if (processes && processes.length > 0) {
+        console.log(`Found ${processes.length} pending processes for Phase 1.`);
+        for (const process of processes) {
+            console.log(`[Phase 1] Processing ${process.process_number} (${process.process_type})...`);
+            try {
+                // Optimization: Add timeout race to prevent infinite hanging
+                const processingPromise = (async () => {
+                    if (process.process_type === 'BULKING') {
+                        return await process_bulking(process, true); // enablePush = true
+                    } else {
+                        return await calculate_and_update_trade_variables_for_other_processes(process, true); // enablePush = true
+                    }
+                })();
+
+                // Timeout after 60 seconds per process to prevent total freeze
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error("Process timed out after 60s")), 60000)
+                );
+
+                await Promise.race([processingPromise, timeoutPromise]);
+                
+                console.log(`[Phase 1] Successfully processed ${process.process_number}.`);
+            } catch (error) {
+                console.error(`[Phase 1] Error processing ${process.process_number}:`, error);
+                // We don't add to skipped yet; Phase 2 will retry strictly
+            }
+        }
+    } else {
+        console.log("No pending processes found for Phase 1.");
+    }
+
+    // --- 2. PHASE 2: Final Cleanup Iteration (Standard Pull) ---
+    // Re-fetch pending status to see what failed or was missed in the push phase.
+    console.log("\n--- Starting Phase 2: Final Cleanup Iteration ---");
+    const cleanupProcesses = await query<DailyProcessRow[]>({
+        query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
+    });
+
+    if (cleanupProcesses && cleanupProcesses.length > 0) {
+        console.log(`Found ${cleanupProcesses.length} processes remaining for Phase 2 cleanup.`);
+        for (const process of cleanupProcesses) {
+            console.log(`[Phase 2] Retrying ${process.process_number}...`);
+            let success = false;
+            try {
+                // Optimization: Add timeout race to prevent infinite hanging
+                const processingPromise = (async () => {
+                    if (process.process_type === 'BULKING') {
+                        return await process_bulking(process, false); // enablePush = false
+                    } else {
+                        return await calculate_and_update_trade_variables_for_other_processes(process, false); // enablePush = false
+                    }
+                })();
+
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error("Cleanup process timed out after 60s")), 60000)
+                );
+
+                success = await Promise.race([processingPromise, timeoutPromise]) as boolean;
+
+            } catch (e) {
+                console.error(`[Phase 2] Cleanup failed for ${process.process_number}:`, e);
+                success = false;
+            }
+            
+            if (!success) {
+                skippedProcessNumbers.push(process.process_number);
+                console.warn(`[Phase 2] Skipping process ${process.process_number} due to calculation failure.`);
+            } else {
+                console.log(`[Phase 2] Successfully recovered ${process.process_number}.`);
+            }
+        }
+    } else {
+        console.log("No processes required Phase 2 cleanup.");
+    }
+
+    console.log("\nTrade variable update process finished.");
+    if (skippedProcessNumbers.length > 0) {
+        console.log(`Skipped Processes: ${skippedProcessNumbers.join(', ')}`);
+    } else {
+        console.log("All processes updated successfully.");
+    }
+    return skippedProcessNumbers;
+}
 /**
  * Interface for the Excel row structure used in the input file.
  */
@@ -1564,7 +1659,7 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
     if (row.process_id) {
         const ingredientRows = await query<any[]>({
             query: `
-                SELECT id, batch_number, strategy, input_qty 
+                SELECT id, batch_number, strategy, input_qty, output_hedge_level_usc_lb, output_cost_usd_50
                 FROM daily_strategy_processing 
                 WHERE process_id = ? 
                   AND input_qty > 0
@@ -1577,6 +1672,8 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
                 batchId: ingRow.id.toString(), // Mapped to row ID as requested
                 batch_number: ingRow.batch_number,
                 strategy: ingRow.strategy || 'UNDEFINED',
+                outrightPrice50kg: Number(row.output_cost_usd_50) || 0, // Defaulting based on standard schema
+                hedgeLevelUSClb: Number(row.output_hedge_level_usc_lb) || 0,
                 quantityKg: Number(ingRow.input_qty)
             }));
         }
