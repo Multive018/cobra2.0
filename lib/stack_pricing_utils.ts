@@ -968,6 +968,7 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
         query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
     });
     console.log("Succesfully fetched unpriced processes")
+    console.log("Succesfully fetched unpriced processes")
 
     if (processes && processes.length > 0) {
         for (const process of processes) {
@@ -1662,6 +1663,7 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
         const ingredientRows = await query<any[]>({
             query: `
                 SELECT id, batch_number, strategy, input_qty, output_hedge_level_usc_lb, output_cost_usd_50
+                SELECT id, batch_number, strategy, input_qty, output_hedge_level_usc_lb, output_cost_usd_50
                 FROM daily_strategy_processing 
                 WHERE process_id = ? 
                   AND input_qty > 0
@@ -1674,6 +1676,8 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
                 batchId: ingRow.id.toString(), // Mapped to row ID as requested
                 batch_number: ingRow.batch_number,
                 strategy: ingRow.strategy || 'UNDEFINED',
+                outrightPrice50kg: Number(row.output_cost_usd_50) || 0, // Defaulting based on standard schema
+                hedgeLevelUSClb: Number(row.output_hedge_level_usc_lb) || 0,
                 outrightPrice50kg: Number(row.output_cost_usd_50) || 0, // Defaulting based on standard schema
                 hedgeLevelUSClb: Number(row.output_hedge_level_usc_lb) || 0,
                 quantityKg: Number(ingRow.input_qty)
