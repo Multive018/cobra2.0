@@ -31,9 +31,11 @@ const poppins = Poppins({
 
 const KG_TO_BAG = 60;
 const CERT_FILTERS = ["RFA", "CAFE", "NET ZERO", "EUDR", "AAA"] as const;
+const TRACKER_FILTERS = ["ALL", ...CERT_FILTERS] as const;
 const MONTH_ORDER = ["Mar-26", "Apr-26", "May-26", "Jun-26", "Jul-26", "Aug-26"] as const;
 
 type CertType = (typeof CERT_FILTERS)[number];
+type TrackerCertType = CertType | "ALL";
 type Unit = "kg" | "bag" | "mt";
 type MainTab = "physical" | "certification" | "tracker" | "contracts" | "blends";
 type UploadMode = "purchases" | "sales" | "manual";
@@ -227,6 +229,371 @@ function parseCerts(raw: any): string[] {
   return [];
 }
 
+function pickFirst(...values: unknown[]): any {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "") return value;
+  }
+  return undefined;
+}
+
+function displayText(value: unknown, fallback = "—") {
+  return value === null || value === undefined || value === "" ? fallback : String(value);
+}
+
+function normalizeDateKey(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw.slice(0, 10);
+}
+
+function getTrackerCertFlags(stock: CertifiedStock) {
+  return {
+    RFA: bool(stock.rfa_certified),
+    CAFE: bool(stock.cafe_certified),
+    EUDR: bool(stock.eudr_certified),
+    "NET ZERO": bool(stock.netzero_project),
+    AAA: bool(stock.aaa_project),
+  } as const;
+}
+
+function matchesTrackerCert(stock: CertifiedStock, cert: TrackerCertType) {
+  if (cert === "ALL") return true;
+  switch (cert) {
+    case "RFA": return bool(stock.rfa_certified);
+    case "CAFE": return bool(stock.cafe_certified);
+    case "EUDR": return bool(stock.eudr_certified);
+    case "NET ZERO": return bool(stock.netzero_project);
+    case "AAA": return bool(stock.aaa_project);
+  }
+  return false;
+}
+
+function getTrackerHolderLabel(stock: CertifiedStock, cert: TrackerCertType) {
+  if (cert === "ALL") return displayText(stock.cooperative || stock.wet_mill || stock.strategy || stock.grade || "Unspecified", "Unspecified");
+  if (cert === "RFA") return displayText(stock.rfa_certificate_holder || stock.cooperative || stock.wet_mill || "Unspecified", "Unspecified");
+  if (cert === "CAFE") return displayText(stock.cafe_certificate_holder || stock.cooperative || stock.wet_mill || "Unspecified", "Unspecified");
+  if (cert === "EUDR") return displayText(stock.eudr_certificate_holder || stock.cooperative || stock.wet_mill || "Unspecified", "Unspecified");
+  if (cert === "AAA") {
+    return displayText(getAaaReservationLabelFromStock(stock) === "AAA/CP" ? (stock.cafe_certificate_holder || stock.cooperative || stock.wet_mill) : (stock.cooperative || stock.wet_mill), "Unspecified");
+  }
+  return displayText(stock.cooperative || stock.wet_mill || "Unspecified", "Unspecified");
+}
+
+function getTrackerRelevantExpiryDates(stock: CertifiedStock, cert: TrackerCertType) {
+  const dates = cert === "ALL"
+    ? [stock.rfa_expiry_date, stock.eudr_expiry_date, stock.cafe_expiry_date, stock.impact_expiry_date]
+    : cert === "RFA"
+      ? [stock.rfa_expiry_date]
+      : cert === "CAFE"
+        ? [stock.cafe_expiry_date]
+        : cert === "EUDR"
+          ? [stock.eudr_expiry_date]
+          : cert === "NET ZERO"
+            ? []
+            : [];
+  return dates.filter((date): date is string => Boolean(date));
+}
+
+function getTrackerDisplayedExpiry(stock: CertifiedStock, cert: TrackerCertType) {
+  const dates = getTrackerRelevantExpiryDates(stock, cert);
+  if (!dates.length) return { label: "—", days: null as number | null };
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const next = dates
+    .map((date) => {
+      const expiry = new Date(date);
+      if (Number.isNaN(expiry.getTime())) return null;
+      const days = Math.ceil((expiry.getTime() - startOfToday) / (1000 * 60 * 60 * 24));
+      return { label: formatDateDisplay(date), days };
+    })
+    .filter((item): item is { label: string; days: number } => Boolean(item))
+    .sort((a, b) => a.days - b.days)[0];
+  return next ?? { label: "—", days: null };
+}
+
+function buildTrackerRow(stock: CertifiedStock, cert: TrackerCertType) {
+  const certFlags = getTrackerCertFlags(stock);
+  const expiry = getTrackerDisplayedExpiry(stock, cert);
+  return {
+    id: stock.id,
+    season: displayText(stock.season),
+    sale_type: displayText(stock.sale_type),
+    outturn: displayText(stock.outturn),
+    lot_number: displayText(stock.lot_number),
+    strategy: displayText(stock.strategy || stock.grade || stock.cooperative || stock.wet_mill || stock.county),
+    cooperative: displayText(stock.cooperative),
+    wet_mill: displayText(stock.wet_mill),
+    county: displayText(stock.county),
+    grade: displayText(stock.grade),
+    grower_code: displayText(stock.grower_code),
+    purchased_weight: asNumber(stock.purchased_weight),
+    rfa_certified: certFlags.RFA,
+    rfa_expiry_date: formatDateDisplay(stock.rfa_expiry_date),
+    rfa_certificate_holder: displayText(stock.rfa_certificate_holder),
+    rfa_declared_weight: stock.rfa_declared_weight == null ? null : asNumber(stock.rfa_declared_weight),
+    eudr_certified: certFlags.EUDR,
+    eudr_expiry_date: formatDateDisplay(stock.eudr_expiry_date),
+    eudr_certificate_holder: displayText(stock.eudr_certificate_holder),
+    eudr_declared_weight: stock.eudr_declared_weight == null ? null : asNumber(stock.eudr_declared_weight),
+    cafe_certified: certFlags.CAFE,
+    cafe_expiry_date: formatDateDisplay(stock.cafe_expiry_date),
+    cafe_certificate_holder: displayText(stock.cafe_certificate_holder),
+    cafe_declared_weight: stock.cafe_declared_weight == null ? null : asNumber(stock.cafe_declared_weight),
+    impact_certified: bool(stock.impact_certified),
+    impact_expiry_date: formatDateDisplay(stock.impact_expiry_date),
+    impact_declared_weight: stock.impact_declared_weight == null ? null : asNumber(stock.impact_declared_weight),
+    aaa_project: certFlags.AAA,
+    aaa_reservation: getAaaReservationLabelFromStock(stock),
+    aaa_volume: stock.aaa_volume == null ? null : asNumber(stock.aaa_volume),
+    geodata_available: bool(stock.geodata_available),
+    aaa_declared_weight: stock.aaa_declared_weight == null ? null : asNumber(stock.aaa_declared_weight),
+    netzero_project: certFlags["NET ZERO"],
+    netzero_declared_weight: stock.netzero_declared_weight == null ? null : asNumber(stock.netzero_declared_weight),
+    fully_declared: bool(stock.fully_declared),
+    recorded_date: formatDateDisplay(stock.recorded_date),
+    tracker_expiry_label: expiry.label,
+    tracker_expiry_days: expiry.days,
+  };
+}
+
+function normalizeCertifiedStock(raw: any): CertifiedStock {
+  const row = raw ?? {};
+  const lotNumber = displayText(
+    pickFirst(
+      row.lot_number,
+      row.lotNumber,
+      row.lot_no,
+      row.lotNo,
+      row.batch_no,
+      row.batchNumber,
+      row.batch,
+      row.name,
+      row.stock_name,
+      row.stockName,
+    ),
+    ""
+  ).trim();
+
+  return {
+    id: asNumber(pickFirst(row.id, row.ID, row.stock_id, row.stockId, row.record_id, row.recordId)) || Date.now(),
+    season: (pickFirst(row.season, row.crop_year, row.cropYear, row.harvest_season, row.harvestSeason) as string | undefined) || null,
+    sale_type: (pickFirst(row.sale_type, row.saleType, row.market, row.channel, row.sale_channel) as string | undefined) || null,
+    outturn: (pickFirst(row.outturn, row.out_turn, row.outturn_no, row.outturnNumber, row.outturn_ref) as string | undefined) || null,
+    lot_number: lotNumber || `LOT-${asNumber(pickFirst(row.id, row.stock_id, row.record_id)) || Math.floor(Math.random() * 100000)}`,
+    strategy: (pickFirst(row.strategy, row.position, row.grade_strategy, row.section, row.stack, row.stack_name, row.stackName) as string | undefined) || null,
+    cooperative: (pickFirst(row.cooperative, row.coop, row.farmer_group, row.group_name, row.company_name, row.organization) as string | undefined) || null,
+    wet_mill: (pickFirst(row.wet_mill, row.wetMill, row.mill, row.station, row.processing_center, row.processingCenter) as string | undefined) || null,
+    county: (pickFirst(row.county, row.region, row.location, row.sub_county, row.subCounty, row.area) as string | undefined) || null,
+    grade: (pickFirst(row.grade, row.classification, row.quality_grade, row.q_grade, row.grade_name) as string | undefined) || null,
+    grower_code: (pickFirst(row.grower_code, row.growerCode, row.grower, row.farmer_code, row.farmerCode, row.code) as string | undefined) || null,
+    purchased_weight: asNumber(pickFirst(row.purchased_weight, row.purchasedWeight, row.weight, row.weight_kilos, row.weightKilos, row.volume, row.available_weight, row.availableWeight, row.stock, row.stockWeight)),
+    rfa_certified: pickFirst(row.rfa_certified, row.rfaCertified, row.rfa, row.RFA),
+    rfa_expiry_date: (pickFirst(row.rfa_expiry_date, row.rfaExpiryDate, row.rfa_expiry, row.rfaExpiry) as string | undefined) || null,
+    rfa_certificate_holder: (pickFirst(row.rfa_certificate_holder, row.rfaCertificateHolder, row.rfa_holder, row.rfaHolder) as string | undefined) || null,
+    rfa_declared_weight: pickFirst(row.rfa_declared_weight, row.rfaDeclaredWeight, row.rfa_weight, row.rfaWeight),
+    eudr_certified: pickFirst(row.eudr_certified, row.eudrCertified, row.eudr),
+    eudr_expiry_date: (pickFirst(row.eudr_expiry_date, row.eudrExpiryDate, row.eudr_expiry, row.eudrExpiry) as string | undefined) || null,
+    eudr_certificate_holder: (pickFirst(row.eudr_certificate_holder, row.eudrCertificateHolder, row.eudr_holder, row.eudrHolder) as string | undefined) || null,
+    eudr_declared_weight: pickFirst(row.eudr_declared_weight, row.eudrDeclaredWeight, row.eudr_weight, row.eudrWeight),
+    cafe_certified: pickFirst(row.cafe_certified, row.cafeCertified, row.cafe),
+    cafe_expiry_date: (pickFirst(row.cafe_expiry_date, row.cafeExpiryDate, row.cafe_expiry, row.cafeExpiry) as string | undefined) || null,
+    cafe_certificate_holder: (pickFirst(row.cafe_certificate_holder, row.cafeCertificateHolder, row.cafe_holder, row.cafeHolder) as string | undefined) || null,
+    cafe_declared_weight: pickFirst(row.cafe_declared_weight, row.cafeDeclaredWeight, row.cafe_weight, row.cafeWeight),
+    impact_certified: pickFirst(row.impact_certified, row.impactCertified, row.impact),
+    impact_expiry_date: (pickFirst(row.impact_expiry_date, row.impactExpiryDate, row.impact_expiry, row.impactExpiry) as string | undefined) || null,
+    impact_declared_weight: pickFirst(row.impact_declared_weight, row.impactDeclaredWeight, row.impact_weight, row.impactWeight),
+    aaa_project: pickFirst(row.aaa_project, row.aaaProject, row.aaa),
+    aaa_volume: pickFirst(row.aaa_volume, row.aaaVolume, row.aaa_volume_kg, row.aaaVolumeKg),
+    geodata_available: pickFirst(row.geodata_available, row.geoDataAvailable, row.geodata, row.geo),
+    aaa_declared_weight: pickFirst(row.aaa_declared_weight, row.aaaDeclaredWeight, row.aaa_weight, row.aaaWeight, row.aaa_reserved_weight),
+    netzero_project: pickFirst(row.netzero_project, row.netzeroProject, row.net_zero_project, row.netZeroProject),
+    netzero_declared_weight: pickFirst(row.netzero_declared_weight, row.netzeroDeclaredWeight, row.netzero_weight, row.netZeroWeight, row.net_zero_declared_weight),
+    fully_declared: pickFirst(row.fully_declared, row.fullyDeclared, row.fully, row.declared_complete, row.declaredComplete),
+    recorded_date: (pickFirst(row.recorded_date, row.recordedDate, row.created_at, row.createdAt, row.date) as string | undefined) || null,
+  };
+}
+
+function normalizeSaleContract(raw: any): SaleContract {
+  const row = raw ?? {};
+  const certifications = parseCerts(pickFirst(row.certifications, row.certification, row.certs, row.certificate_list, row.certificateList));
+  return {
+    id: asNumber(pickFirst(row.id, row.ID, row.contract_id, row.contractId, row.record_id, row.recordId)) || Date.now(),
+    contract_number: displayText(pickFirst(row.contract_number, row.contractNumber, row.contract_no, row.contractNo, row.reference, row.ref, row.name), ""),
+    client: (pickFirst(row.client, row.customer, row.buyer, row.account) as string | undefined) || null,
+    weight_kilos: asNumber(pickFirst(row.weight_kilos, row.weightKilos, row.weight, row.kilos, row.qty, row.quantity)),
+    shipping_date: displayText(pickFirst(row.shipping_date, row.shippingDate, row.ship_date, row.shipDate, row.date), ""),
+    strategy: (pickFirst(row.strategy, row.quality, row.grade_strategy, row.position) as string | undefined) || null,
+    quality: (pickFirst(row.quality, row.quality_name, row.sale_type) as string | undefined) || null,
+    grade: (pickFirst(row.grade, row.grade_name, row.classification) as string | undefined) || null,
+    certifications,
+    blend_id: pickFirst(row.blend_id, row.blendId) != null ? asNumber(pickFirst(row.blend_id, row.blendId)) : null,
+    blend_name: (pickFirst(row.blend_name, row.blendName, row.blend?.name) as string | undefined) || null,
+  };
+}
+
+function normalizeBlend(raw: any): Blend {
+  const row = raw ?? {};
+  const blend: Blend = {
+    id: asNumber(pickFirst(row.id, row.ID, row.blend_id, row.blendId, row.record_id, row.recordId)) || Date.now(),
+    name: displayText(pickFirst(row.name, row.blend_name, row.blendName, row.title), ""),
+    client: (pickFirst(row.client, row.customer) as string | undefined) || null,
+    grade: (pickFirst(row.grade, row.grade_name, row.classification) as string | undefined) || null,
+    cup_profile: (pickFirst(row.cup_profile, row.cupProfile, row.profile) as string | undefined) || null,
+    blend_no: (pickFirst(row.blend_no, row.blendNo, row.blend_number, row.blendNumber) as string | undefined) || null,
+  };
+  for (const comp of BLEND_COMPONENTS) {
+    const value = asNumber(pickFirst(row[comp.key], row.components?.[comp.key], row.component?.[comp.key]));
+    if (value > 0) (blend as any)[comp.key] = value;
+  }
+  return blend;
+}
+
+function normalizePhysicalRow(row: any): PhysicalRow {
+  const source = row ?? {};
+  return {
+    stack: displayText(pickFirst(source.stack, source.position, source.name, source.strategy, source.label, source.stack_name, source.stackName), "unassigned"),
+    theoretical: asNumber(pickFirst(source.theoretical, source.theoretical_volume, source.theoreticalVolume, source.available, source.available_volume, source.availableVolume, source.volume, source.stock, source.stock_kilos, source.stockKg, source.kg, source.quantity)),
+    months: MONTH_ORDER.reduce((acc, month) => ({
+      ...acc,
+      [month]: asNumber(pickFirst(source?.months?.[month], source?.[month], source?.shipmentsByMonth?.[month], source?.stockByMonth?.[month], source?.allocations?.[month], source?.[month.toLowerCase()])),
+    }), {} as Record<string, number>),
+    shorts: asNumber(pickFirst(source.shorts, source.total_shorts, source.totalShorts, source.deficit, source.shortage, source.short)),
+    net: asNumber(pickFirst(source.net, source.net_position, source.netPosition, source.balance, source.remaining, source.closing_balance)),
+  };
+}
+
+function getAaaReservationLabelFromStock(stock: CertifiedStock) {
+  return bool(stock.cafe_certified) || asNumber(stock.cafe_declared_weight) > 0 ? "AAA/CP" : "AAA";
+}
+
+function getAaaReservationLabelFromSale(sale: SaleContract) {
+  const certs = parseCerts(sale.certifications).map((c) => c.toUpperCase());
+  return certs.includes("CP") || certs.includes("CAFE") || certs.includes("AAA/CP") ? "AAA/CP" : "AAA";
+}
+
+
+type TrackerColumn = {
+  key: string;
+  label: string;
+  align: "left" | "center" | "right";
+  render: (row: Record<string, any>) => React.ReactNode;
+  exportValue: (row: Record<string, any>) => string | number | boolean;
+};
+
+function formatDateDisplay(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "—";
+  const base = raw.slice(0, 10);
+  const match = base.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const [, year, month, day] = match;
+    return `${day}/${month}/${year}`;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function isWithinDateRange(dateValue: unknown, start: string, end: string) {
+  const raw = String(dateValue ?? "").trim().slice(0, 10);
+  if (!raw) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return false;
+  if (start && raw < start) return false;
+  if (end && raw > end) return false;
+  return true;
+}
+
+function formatRangeLabel(start: string, end: string) {
+  if (start && end) return `${formatDateDisplay(start)} – ${formatDateDisplay(end)}`;
+  if (start) return `${formatDateDisplay(start)} onwards`;
+  if (end) return `up to ${formatDateDisplay(end)}`;
+  return "All dates";
+}
+
+function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
+  const common: TrackerColumn[] = [
+    { key: "season", label: "Season", align: "left", render: (row) => row.season, exportValue: (row) => row.season },
+    { key: "sale_type", label: "Sale Type", align: "left", render: (row) => row.sale_type, exportValue: (row) => row.sale_type },
+    { key: "outturn", label: "Outturn", align: "left", render: (row) => row.outturn, exportValue: (row) => row.outturn },
+    { key: "lot_number", label: "Lot", align: "left", render: (row) => row.lot_number, exportValue: (row) => row.lot_number },
+    { key: "strategy", label: "Strategy", align: "left", render: (row) => row.strategy, exportValue: (row) => row.strategy },
+    { key: "cooperative", label: "Cooperative", align: "left", render: (row) => row.cooperative, exportValue: (row) => row.cooperative },
+    { key: "wet_mill", label: "Wet Mill", align: "left", render: (row) => row.wet_mill, exportValue: (row) => row.wet_mill },
+    { key: "county", label: "County", align: "left", render: (row) => row.county, exportValue: (row) => row.county },
+    { key: "grade", label: "Grade", align: "left", render: (row) => row.grade, exportValue: (row) => row.grade },
+    { key: "grower_code", label: "Grower", align: "left", render: (row) => row.grower_code, exportValue: (row) => row.grower_code },
+    { key: "purchased_weight", label: "Purchased", align: "right", render: (row) => `${formatQty(row.purchased_weight, unit)} ${unitText(unit)}`, exportValue: (row) => formatQty(row.purchased_weight, unit) },
+  ];
+
+  const certColumns: Record<TrackerCertType, TrackerColumn[]> = {
+    ALL: [
+      { key: "rfa_certified", label: "RFA", align: "center", render: (row) => (row.rfa_certified ? "Yes" : "No"), exportValue: (row) => (row.rfa_certified ? "Yes" : "No") },
+      { key: "rfa_expiry_date", label: "RFA Expiry", align: "center", render: (row) => row.rfa_expiry_date, exportValue: (row) => row.rfa_expiry_date },
+      { key: "rfa_certificate_holder", label: "RFA Holder", align: "center", render: (row) => row.rfa_certificate_holder, exportValue: (row) => row.rfa_certificate_holder },
+      { key: "rfa_declared_weight", label: "RFA Decl.", align: "right", render: (row) => (row.rfa_declared_weight != null ? `${formatQty(row.rfa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.rfa_declared_weight != null ? formatQty(row.rfa_declared_weight, unit) : "") },
+      { key: "eudr_certified", label: "EUDR", align: "center", render: (row) => (row.eudr_certified ? "Yes" : "No"), exportValue: (row) => (row.eudr_certified ? "Yes" : "No") },
+      { key: "eudr_expiry_date", label: "EUDR Expiry", align: "center", render: (row) => row.eudr_expiry_date, exportValue: (row) => row.eudr_expiry_date },
+      { key: "eudr_certificate_holder", label: "EUDR Holder", align: "center", render: (row) => row.eudr_certificate_holder, exportValue: (row) => row.eudr_certificate_holder },
+      { key: "eudr_declared_weight", label: "EUDR Decl.", align: "right", render: (row) => (row.eudr_declared_weight != null ? `${formatQty(row.eudr_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.eudr_declared_weight != null ? formatQty(row.eudr_declared_weight, unit) : "") },
+      { key: "cafe_certified", label: "CAFE", align: "center", render: (row) => (row.cafe_certified ? "Yes" : "No"), exportValue: (row) => (row.cafe_certified ? "Yes" : "No") },
+      { key: "cafe_expiry_date", label: "CAFE Expiry", align: "center", render: (row) => row.cafe_expiry_date, exportValue: (row) => row.cafe_expiry_date },
+      { key: "cafe_certificate_holder", label: "CAFE Holder", align: "center", render: (row) => row.cafe_certificate_holder, exportValue: (row) => row.cafe_certificate_holder },
+      { key: "cafe_declared_weight", label: "CAFE Decl.", align: "right", render: (row) => (row.cafe_declared_weight != null ? `${formatQty(row.cafe_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.cafe_declared_weight != null ? formatQty(row.cafe_declared_weight, unit) : "") },
+      { key: "impact_certified", label: "Impact", align: "center", render: (row) => (row.impact_certified ? "Yes" : "No"), exportValue: (row) => (row.impact_certified ? "Yes" : "No") },
+      { key: "impact_expiry_date", label: "Impact Expiry", align: "center", render: (row) => row.impact_expiry_date, exportValue: (row) => row.impact_expiry_date },
+      { key: "impact_declared_weight", label: "Impact Decl.", align: "right", render: (row) => (row.impact_declared_weight != null ? `${formatQty(row.impact_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.impact_declared_weight != null ? formatQty(row.impact_declared_weight, unit) : "") },
+      { key: "aaa_project", label: "AAA", align: "center", render: (row) => row.aaa_project ? "Yes" : "No", exportValue: (row) => (row.aaa_project ? "Yes" : "No") },
+      { key: "aaa_volume", label: "AAA Vol.", align: "right", render: (row) => (row.aaa_volume != null ? `${formatQty(row.aaa_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_volume != null ? formatQty(row.aaa_volume, unit) : "") },
+      { key: "geodata_available", label: "Geo", align: "center", render: (row) => (row.geodata_available ? "Yes" : "No"), exportValue: (row) => (row.geodata_available ? "Yes" : "No") },
+      { key: "aaa_declared_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_declared_weight != null ? `${formatQty(row.aaa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_declared_weight != null ? formatQty(row.aaa_declared_weight, unit) : "") },
+      { key: "netzero_project", label: "Net Zero", align: "center", render: (row) => (row.netzero_project ? "Yes" : "No"), exportValue: (row) => (row.netzero_project ? "Yes" : "No") },
+      { key: "netzero_declared_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_declared_weight != null ? `${formatQty(row.netzero_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.netzero_declared_weight != null ? formatQty(row.netzero_declared_weight, unit) : "") },
+      { key: "fully_declared", label: "Fully Declared", align: "center", render: (row) => (row.fully_declared ? "Yes" : "No"), exportValue: (row) => (row.fully_declared ? "Yes" : "No") },
+    ],
+    RFA: [
+      { key: "rfa_certified", label: "RFA", align: "center", render: (row) => (row.rfa_certified ? "Yes" : "No"), exportValue: (row) => (row.rfa_certified ? "Yes" : "No") },
+      { key: "rfa_expiry_date", label: "RFA Expiry", align: "center", render: (row) => row.rfa_expiry_date, exportValue: (row) => row.rfa_expiry_date },
+      { key: "rfa_certificate_holder", label: "RFA Holder", align: "center", render: (row) => row.rfa_certificate_holder, exportValue: (row) => row.rfa_certificate_holder },
+      { key: "rfa_declared_weight", label: "RFA Decl.", align: "right", render: (row) => (row.rfa_declared_weight != null ? `${formatQty(row.rfa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.rfa_declared_weight != null ? formatQty(row.rfa_declared_weight, unit) : "") },
+    ],
+    CAFE: [
+      { key: "cafe_certified", label: "CAFE", align: "center", render: (row) => (row.cafe_certified ? "Yes" : "No"), exportValue: (row) => (row.cafe_certified ? "Yes" : "No") },
+      { key: "cafe_expiry_date", label: "CAFE Expiry", align: "center", render: (row) => row.cafe_expiry_date, exportValue: (row) => row.cafe_expiry_date },
+      { key: "cafe_certificate_holder", label: "CAFE Holder", align: "center", render: (row) => row.cafe_certificate_holder, exportValue: (row) => row.cafe_certificate_holder },
+      { key: "cafe_declared_weight", label: "CAFE Decl.", align: "right", render: (row) => (row.cafe_declared_weight != null ? `${formatQty(row.cafe_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.cafe_declared_weight != null ? formatQty(row.cafe_declared_weight, unit) : "") },
+    ],
+    EUDR: [
+      { key: "eudr_certified", label: "EUDR", align: "center", render: (row) => (row.eudr_certified ? "Yes" : "No"), exportValue: (row) => (row.eudr_certified ? "Yes" : "No") },
+      { key: "eudr_expiry_date", label: "EUDR Expiry", align: "center", render: (row) => row.eudr_expiry_date, exportValue: (row) => row.eudr_expiry_date },
+      { key: "eudr_certificate_holder", label: "EUDR Holder", align: "center", render: (row) => row.eudr_certificate_holder, exportValue: (row) => row.eudr_certificate_holder },
+      { key: "eudr_declared_weight", label: "EUDR Decl.", align: "right", render: (row) => (row.eudr_declared_weight != null ? `${formatQty(row.eudr_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.eudr_declared_weight != null ? formatQty(row.eudr_declared_weight, unit) : "") },
+    ],
+    AAA: [
+      { key: "aaa_reservation", label: "AAA Reservation", align: "center", render: (row) => row.aaa_reservation, exportValue: (row) => row.aaa_reservation },
+      { key: "aaa_volume", label: "AAA Vol.", align: "right", render: (row) => (row.aaa_volume != null ? `${formatQty(row.aaa_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_volume != null ? formatQty(row.aaa_volume, unit) : "") },
+      { key: "geodata_available", label: "Geo", align: "center", render: (row) => (row.geodata_available ? "Yes" : "No"), exportValue: (row) => (row.geodata_available ? "Yes" : "No") },
+      { key: "aaa_declared_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_declared_weight != null ? `${formatQty(row.aaa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_declared_weight != null ? formatQty(row.aaa_declared_weight, unit) : "") },
+    ],
+    "NET ZERO": [
+      { key: "netzero_project", label: "Net Zero", align: "center", render: (row) => (row.netzero_project ? "Yes" : "No"), exportValue: (row) => (row.netzero_project ? "Yes" : "No") },
+      { key: "netzero_declared_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_declared_weight != null ? `${formatQty(row.netzero_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.netzero_declared_weight != null ? formatQty(row.netzero_declared_weight, unit) : "") },
+    ],
+  };
+
+  return [...common, ...certColumns[cert]];
+}
+
+function getTrackerExportRows(rows: Record<string, any>[], columns: TrackerColumn[]) {
+  return rows.map((row) =>
+    columns.reduce<Record<string, string | number | boolean>>((acc, column) => {
+      acc[column.label] = column.exportValue(row);
+      return acc;
+    }, {})
+  );
+}
 function formatMonth(dateStr: string) {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return "Unscheduled";
@@ -254,60 +621,65 @@ function stackLabel(stack: string) {
 }
 
 function buildPhysicalData(rows: PhysicalRow[]): PhysicalDataState {
+  const totalTheoretical = rows.reduce((sum, row) => sum + asNumber(row.theoretical), 0);
+  const totalShorts = rows.reduce((sum, row) => sum + asNumber(row.shorts), 0);
+  const totalNet = rows.reduce((sum, row) => sum + asNumber(row.net), 0);
+
   return {
     gridData: rows,
     months: [...MONTH_ORDER],
     kpis: {
-      totalTheoretical: rows.reduce((sum, r) => sum + asNumber(r.theoretical), 0),
-      totalShorts: rows.reduce((sum, r) => sum + asNumber(r.shorts), 0),
-      totalNet: rows.reduce((sum, r) => sum + asNumber(r.net), 0),
+      totalTheoretical,
+      totalShorts,
+      totalNet,
     },
   };
 }
 
 function getBlendCompositionRow(blend: Blend) {
-  return BLEND_COMPONENTS.map((comp) => ({ ...comp, value: asNumber(blend[comp.key] ?? blend.components?.[comp.key] ?? 0) })).filter((entry) => entry.value > 0);
+  return BLEND_COMPONENTS
+    .map((comp) => ({
+      key: comp.key,
+      label: comp.label,
+      value: asNumber(blend?.[comp.key] ?? blend?.components?.[comp.key] ?? 0),
+    }))
+    .filter((item) => item.value > 0);
 }
 
-function normalizeBlendForm(form: BlendFormState) {
-  return Object.fromEntries(Object.entries(form).map(([k, v]) => [k, k === "name" || k === "client" || k === "grade" || k === "cup_profile" || k === "blend_no" ? v.trim() : v === "" ? 0 : Number(v)]));
+function normalizePhysicalPayload(data: any): PhysicalDataState {
+  if (Array.isArray(data?.gridData)) {
+    const rows = data.gridData.map(normalizePhysicalRow);
+    const months = Array.isArray(data?.months) && data.months.length ? data.months : [...MONTH_ORDER];
+    const kpis = data?.kpis && typeof data.kpis === "object"
+      ? {
+          totalTheoretical: asNumber(data.kpis.totalTheoretical),
+          totalShorts: asNumber(data.kpis.totalShorts),
+          totalNet: asNumber(data.kpis.totalNet),
+        }
+      : buildPhysicalData(rows).kpis;
+
+    return { gridData: rows, months, kpis };
+  }
+
+  if (Array.isArray(data?.data)) return normalizePhysicalPayload({ gridData: data.data, months: data.months, kpis: data.kpis });
+  if (Array.isArray(data?.rows)) return normalizePhysicalPayload({ gridData: data.rows, months: data.months, kpis: data.kpis });
+  if (Array.isArray(data)) return buildPhysicalData(data.map(normalizePhysicalRow));
+  return buildPhysicalData([]);
 }
 
-function safeRows(data: any) {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.rows)) return data.rows;
-  if (Array.isArray(data?.data)) return data.data;
-  return [];
-}
-
-function SectionCard({ title, subtitle, children, right }: { title: string; subtitle?: string; children: React.ReactNode; right?: React.ReactNode }) {
-  return (
-    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-[#F5F5F3] px-5 py-4">
-        <div>
-          <div className="text-sm font-bold text-[#51534a]">{title}</div>
-          {subtitle ? <div className="mt-1 text-xs text-[#968C83]">{subtitle}</div> : null}
-        </div>
-        {right}
-      </div>
-      <div className="p-5">{children}</div>
-    </div>
-  );
-}
-
-function MetricCard({ title, value, subtitle, tone = "default" }: { title: string; value: string; subtitle?: string; tone?: "default" | "good" | "warn" }) {
-  const toneClass = tone === "good" ? "text-[#007680]" : tone === "warn" ? "text-[#B9975B]" : "text-[#51534a]";
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
-      <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">{title}</div>
-      <div className={`mt-2 text-3xl font-bold ${toneClass}`}>{value}</div>
-      {subtitle ? <div className="mt-2 text-xs text-[#968C83]">{subtitle}</div> : null}
-    </div>
-  );
-}
-
-function Chip({ active, children, onClick }: { active?: boolean; children: React.ReactNode; onClick?: () => void }) {
-  return <button type="button" onClick={onClick} className={`rounded-full border px-4 py-1.5 text-sm font-bold transition ${active ? "border-[#007680] bg-[#007680] text-white" : "border-[#D6D2C4] bg-white text-[#968C83] hover:border-[#007680] hover:text-[#007680]"}`}>{children}</button>;
+function normalizeBlendForm(form: BlendFormState): Partial<Blend> {
+  return {
+    name: form.name,
+    client: form.client || undefined,
+    grade: form.grade || undefined,
+    cup_profile: form.cup_profile || undefined,
+    blend_no: form.blend_no || undefined,
+    ...Object.fromEntries(
+      BLEND_COMPONENTS
+        .map((comp): [string, number] => [comp.key, asNumber(form[comp.key])])
+        .filter(([_, value]) => value > 0)
+    ),
+  };
 }
 
 function FileField({ label, accept, file, onFile }: { label: string; accept: string; file: File | null; onFile: (f: File | null) => void }) {
@@ -336,21 +708,19 @@ function Popup({ text, onClose }: { text: PopupState | null; onClose: () => void
   );
 }
 
-function ExportMenu({ open, onDownload }: { open: boolean; onDownload: (type: "csv" | "excel") => void }) {
-  if (!open) return null;
-  return (
-    <div className="absolute right-0 top-[52px] z-20 w-44 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
-      <button type="button" onClick={() => onDownload("csv")} className="w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-slate-700 transition hover:bg-slate-50">Download CSV</button>
-      <button type="button" onClick={() => onDownload("excel")} className="w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-slate-700 transition hover:bg-slate-50">Download Excel</button>
-    </div>
-  );
+function safeRows(data: any): Record<string, any>[] {
+  if (Array.isArray(data)) return data;
+  if (data?.data && Array.isArray(data.data)) return data.data;
+  if (data?.rows && Array.isArray(data.rows)) return data.rows;
+  return [];
 }
 
 function toCsv(rows: Record<string, any>[]) {
-  if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
+  if (rows.length === 0) return "";
+  const safeHeaders = Object.keys(rows[0] ?? {});
   const escape = (value: any) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-  return [headers.join(","), ...rows.map((row) => headers.map((h) => escape(row[h])).join(","))].join("");
+  const body = rows.map((row) => safeHeaders.map((header) => escape(row[header])).join(",")).join("\n");
+  return [safeHeaders.join(","), body].filter(Boolean).join("\n");
 }
 
 function toExcelHtml(title: string, rows: Record<string, any>[]) {
@@ -358,6 +728,97 @@ function toExcelHtml(title: string, rows: Record<string, any>[]) {
   const headHtml = headers.map((h) => `<th style="border:1px solid #ccc;padding:6px;background:#51534a;color:#fff;text-align:left;">${h}</th>`).join("");
   const bodyHtml = rows.map((row) => `<tr>${headers.map((h) => `<td style="border:1px solid #ccc;padding:6px;">${String(row[h] ?? "")}</td>`).join("")}</tr>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body><table>${headers.length ? `<thead><tr>${headHtml}</tr></thead>` : ""}<tbody>${bodyHtml}</tbody></table></body></html>`;
+}
+
+function MetricCard({
+  title,
+  value,
+  subtitle,
+  tone = "default",
+}: {
+  title: string;
+  value: string | number;
+  subtitle?: string;
+  tone?: "default" | "good" | "warn";
+}) {
+  const toneClass =
+    tone === "good"
+      ? "text-[#007680]"
+      : tone === "warn"
+      ? "text-[#B9975B]"
+      : "text-[#51534a]";
+
+  return (
+    <div className="min-w-0 rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+      {/* Title */}
+      <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83] truncate">
+        {title}
+      </div>
+
+      {/* Value */}
+      <div
+        className={`mt-2 text-2xl md:text-3xl font-bold ${toneClass} break-word leading-tight`}
+      >
+        {value}
+      </div>
+
+      {/* Subtitle */}
+      {subtitle ? (
+        <div className="mt-1 text-xs text-[#968C83] truncate">
+          {subtitle}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Chip({
+  active,
+  children,
+  onClick,
+}: {
+  active?: boolean;
+  children?: React.ReactNode;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full border px-4 py-1.5 text-sm font-bold transition ${
+        active
+          ? "border-[#007680] bg-[#007680] text-white"
+          : "border-[#D6D2C4] bg-white text-[#968C83] hover:border-[#007680] hover:text-[#007680]"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SectionCard({
+  title,
+  subtitle,
+  children,
+  right,
+}: {
+  title: string;
+  subtitle?: string;
+  children?: React.ReactNode;
+  right?: React.ReactNode;
+}) {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-[#F5F5F3] px-5 py-4">
+        <div>
+          <div className="text-sm font-bold text-[#51534a]">{title}</div>
+          {subtitle ? <div className="mt-1 text-xs text-[#968C83]">{subtitle}</div> : null}
+        </div>
+        {right}
+      </div>
+      <div className="p-5">{children}</div>
+    </div>
+  );
 }
 
 export default function Page() {
@@ -369,8 +830,13 @@ export default function Page() {
   const [physicalData, setPhysicalData] = useState<PhysicalDataState>({ gridData: [], months: [...MONTH_ORDER], kpis: { totalTheoretical: 0, totalShorts: 0, totalNet: 0 } });
   const [loading, setLoading] = useState(true);
   const [physicalLoading, setPhysicalLoading] = useState(false);
+  const [hasFetchedPhysical, setHasFetchedPhysical] = useState(false);
   const [activeCert, setActiveCert] = useState<CertType>("RFA");
-  const [trackerCert, setTrackerCert] = useState<CertType>("RFA");
+  const [trackerCert, setTrackerCert] = useState<TrackerCertType>("RFA");
+  const [trackerDateStartDraft, setTrackerDateStartDraft] = useState("");
+  const [trackerDateEndDraft, setTrackerDateEndDraft] = useState("");
+  const [trackerDateStartFilter, setTrackerDateStartFilter] = useState("");
+  const [trackerDateEndFilter, setTrackerDateEndFilter] = useState("");
   const [selectedBlendId, setSelectedBlendId] = useState<number | null>(null);
   const [blendSearch, setBlendSearch] = useState("");
   const [blendForm, setBlendForm] = useState<BlendFormState>({ ...INITIAL_BLEND_FORM });
@@ -400,21 +866,22 @@ export default function Page() {
         ]);
 
         if (stocksRes.ok) {
-          const rows = safeRows(await stocksRes.json());
+          const rows = safeRows(await stocksRes.json()).map(normalizeCertifiedStock) as CertifiedStock[];
+          console.log("Data is here", rows);
           setStocks(rows.length ? rows : SAMPLE_STOCKS);
         } else {
           setStocks(SAMPLE_STOCKS);
         }
 
         if (salesRes.ok) {
-          const rows = safeRows(await salesRes.json());
+          const rows = safeRows(await salesRes.json()).map(normalizeSaleContract) as SaleContract[];
           setSales(rows.length ? rows : SAMPLE_SALES);
         } else {
           setSales(SAMPLE_SALES);
         }
 
         if (blendsRes.ok) {
-          const rows = safeRows(await blendsRes.json());
+          const rows = safeRows(await blendsRes.json()).map(normalizeBlend) as Blend[];
           setBlends(rows.length ? rows : SAMPLE_BLENDS);
         } else {
           setBlends(SAMPLE_BLENDS);
@@ -456,45 +923,80 @@ export default function Page() {
     return () => document.removeEventListener("mousedown", onDownloadOutside);
   }, [downloadOpen]);
 
+
   const certificationRows = useMemo(() => {
     const rows = new Map<string, CertRow>();
     const months = new Set<string>(MONTH_ORDER as unknown as string[]);
+    const isAaaMode = activeCert === "AAA";
 
     const activeFlag = (stock: CertifiedStock) => {
       switch (activeCert) {
-        case "RFA": return bool(stock.rfa_certified);
-        case "CAFE": return bool(stock.cafe_certified);
-        case "NET ZERO": return bool(stock.netzero_project);
-        case "EUDR": return bool(stock.eudr_certified);
-        case "AAA": return bool(stock.aaa_project);
+        case "RFA":
+          return bool(stock.rfa_certified);
+        case "CAFE":
+          return bool(stock.cafe_certified);
+        case "NET ZERO":
+          return bool(stock.netzero_project);
+        case "EUDR":
+          return bool(stock.eudr_certified);
+        case "AAA":
+          return bool(stock.aaa_project);
       }
     };
 
+    const getRowKeyFromStock = (stock: CertifiedStock) => {
+      if (isAaaMode) return getAaaReservationLabelFromStock(stock);
+      return displayText(stock.strategy || stock.grade || stock.cooperative || stock.lot_number || "Unassigned");
+    };
+
+    const getRowKeyFromSale = (sale: SaleContract) => {
+      if (isAaaMode) return getAaaReservationLabelFromSale(sale);
+      return displayText(sale.strategy || sale.quality || sale.grade || sale.client || "Unassigned");
+    };
+
+    const getOrCreateRow = (strategy: string) => {
+      const current = rows.get(strategy);
+      if (current) return current;
+      const next: CertRow = { strategy, available: 0, shipmentsByMonth: {}, totalShipment: 0, netPosition: 0, tags: [], linkedLots: 0, linkedContracts: 0 };
+      rows.set(strategy, next);
+      return next;
+    };
+
     stocks.filter(activeFlag).forEach((stock) => {
-      const strategy = stock.strategy || "Unassigned";
-      const current = rows.get(strategy) ?? { strategy, available: 0, shipmentsByMonth: {}, totalShipment: 0, netPosition: 0, tags: [], linkedLots: 0, linkedContracts: 0 };
-      current.available += asNumber(stock.purchased_weight);
-      current.netPosition += asNumber(stock.purchased_weight);
+      const strategy = getRowKeyFromStock(stock);
+      const current = getOrCreateRow(strategy);
+      const available = asNumber(stock.purchased_weight);
+      current.available += available;
+      current.netPosition += available;
       current.linkedLots += 1;
-      rows.set(strategy, current);
+      current.tags = Array.from(new Set([...current.tags, ...(isAaaMode ? [strategy] : [])]));
     });
 
     sales.forEach((sale) => {
       const certs = parseCerts(sale.certifications).map((c) => c.toUpperCase());
-      if (!certs.includes(activeCert)) return;
-      const strategy = sale.strategy || sale.quality || "Unassigned";
-      const current = rows.get(strategy) ?? { strategy, available: 0, shipmentsByMonth: {}, totalShipment: 0, netPosition: 0, tags: [], linkedLots: 0, linkedContracts: 0 };
+      const matchesActive = activeCert === "AAA" ? certs.some((c) => ["AAA", "AAA/CP", "CP"].includes(c)) : certs.includes(activeCert);
+      if (!matchesActive) return;
+      const strategy = getRowKeyFromSale(sale);
+      const current = getOrCreateRow(strategy);
       const month = formatMonth(sale.shipping_date);
       months.add(month);
-      current.shipmentsByMonth[month] = (current.shipmentsByMonth[month] || 0) + asNumber(sale.weight_kilos);
-      current.totalShipment += asNumber(sale.weight_kilos);
-      current.netPosition -= asNumber(sale.weight_kilos);
+      const shipment = asNumber(sale.weight_kilos);
+      current.shipmentsByMonth[month] = (current.shipmentsByMonth[month] || 0) + shipment;
+      current.totalShipment += shipment;
+      current.netPosition -= shipment;
       current.tags = Array.from(new Set([...current.tags, ...certs]));
       current.linkedContracts += 1;
-      rows.set(strategy, current);
     });
 
-    const tableData = Array.from(rows.values()).sort((a, b) => a.strategy.localeCompare(b.strategy));
+    const tableData = Array.from(rows.values()).sort((a, b) => {
+      if (!isAaaMode) return a.strategy.localeCompare(b.strategy);
+      const order = { "AAA": 0, "AAA/CP": 1 } as Record<string, number>;
+      const ao = order[a.strategy] ?? 99;
+      const bo = order[b.strategy] ?? 99;
+      if (ao !== bo) return ao - bo;
+      return a.strategy.localeCompare(b.strategy);
+    });
+
     const certMonths = Array.from(months).sort((a, b) => {
       const ai = MONTH_ORDER.indexOf(a as (typeof MONTH_ORDER)[number]);
       const bi = MONTH_ORDER.indexOf(b as (typeof MONTH_ORDER)[number]);
@@ -503,10 +1005,13 @@ export default function Page() {
       if (bi === -1) return -1;
       return ai - bi;
     });
+
     const stock = tableData.reduce((sum, row) => sum + row.available, 0);
     const shorts = tableData.reduce((sum, row) => sum + row.totalShipment, 0);
     const net = tableData.reduce((sum, row) => sum + row.netPosition, 0);
-    const supplyChainStock = stocks.filter((stockRow) => activeFlag(stockRow) && ["RFA", "CAFE", "EUDR"].includes(activeCert)).reduce((sum, stockRow) => sum + asNumber(stockRow.purchased_weight), 0);
+    const supplyChainStock = stocks
+      .filter((stockRow) => activeFlag(stockRow) && ["RFA", "CAFE", "EUDR"].includes(activeCert))
+      .reduce((sum, stockRow) => sum + asNumber(stockRow.purchased_weight), 0);
 
     return { tableData, months: certMonths, kpis: { stock, shorts, net, supplyChainStock } };
   }, [activeCert, sales, stocks]);
@@ -521,7 +1026,10 @@ export default function Page() {
     }
   }), [stocks, activeCert]);
 
-  const activeCertContracts = useMemo(() => sales.filter((sale) => parseCerts(sale.certifications).some((c) => c.toUpperCase() === activeCert)), [sales, activeCert]);
+  const activeCertContracts = useMemo(() => sales.filter((sale) => {
+    const certs = parseCerts(sale.certifications).map((c) => c.toUpperCase());
+    return activeCert === "AAA" ? certs.some((c) => ["AAA", "AAA/CP", "CP"].includes(c)) : certs.includes(activeCert);
+  }), [sales, activeCert]);
 
   const certInsights = useMemo(() => {
     const certifiedKg = activeCertLots.reduce((sum, stock) => sum + asNumber(stock.purchased_weight), 0);
@@ -529,56 +1037,102 @@ export default function Page() {
     return { certifiedKg, declaredKg, linkedContracts: activeCertContracts.length, coverage: certifiedKg > 0 ? (declaredKg / certifiedKg) * 100 : 0 };
   }, [activeCertLots, activeCertContracts]);
 
-  const trackerRows = useMemo(() => {
-    return CERT_FILTERS.map((cert) => {
-      const certLots = stocks.filter((stock) => {
-        switch (cert) {
-          case "RFA": return bool(stock.rfa_certified);
-          case "CAFE": return bool(stock.cafe_certified);
-          case "NET ZERO": return bool(stock.netzero_project);
-          case "EUDR": return bool(stock.eudr_certified);
-          case "AAA": return bool(stock.aaa_project);
-        }
-      });
+  const aaaAllocationSummary = useMemo(() => {
+    const stocksForAaa = stocks.filter((stock) => bool(stock.aaa_project));
+    const contractsForAaa = sales.filter((sale) => parseCerts(sale.certifications).some((c) => ["AAA", "AAA/CP", "CP"].includes(c.toUpperCase())));
+    const bucket = (label: "AAA" | "AAA/CP") => {
+      const lots = stocksForAaa.filter((stock) => getAaaReservationLabelFromStock(stock) === label);
+      const salesForBucket = contractsForAaa.filter((sale) => getAaaReservationLabelFromSale(sale) === label);
+      const lotKg = lots.reduce((sum, stock) => sum + asNumber(stock.purchased_weight), 0);
+      const declaredKg = salesForBucket.reduce((sum, sale) => sum + asNumber(sale.weight_kilos), 0);
+      return { label, lotKg, lotCount: lots.length, declaredKg, contractCount: salesForBucket.length, balanceKg: lotKg - declaredKg };
+    };
 
-      const totalKg = certLots.reduce((sum, stock) => sum + asNumber(stock.purchased_weight), 0);
-      const declaredKg = certLots.reduce((sum, stock) => {
-        switch (cert) {
-          case "RFA": return sum + asNumber(stock.rfa_declared_weight);
-          case "CAFE": return sum + asNumber(stock.cafe_declared_weight);
-          case "EUDR": return sum + asNumber(stock.eudr_declared_weight);
-          case "AAA": return sum + asNumber(stock.aaa_declared_weight);
-          case "NET ZERO": return sum + asNumber(stock.netzero_declared_weight);
-        }
-      }, 0);
-      const holders = certLots.reduce<Record<string, number>>((acc, stock) => {
-        const holder = cert === "RFA" ? stock.rfa_certificate_holder || stock.cooperative || "Unspecified" : cert === "CAFE" ? stock.cafe_certificate_holder || stock.cooperative || "Unspecified" : cert === "EUDR" ? stock.eudr_certificate_holder || stock.cooperative || "Unspecified" : stock.cooperative || "Unspecified";
-        acc[holder] = (acc[holder] || 0) + asNumber(stock.purchased_weight);
-        return acc;
-      }, {});
-      const expiringSoon = certLots.filter((stock) => {
-        const expiries = [stock.rfa_expiry_date, stock.eudr_expiry_date, stock.cafe_expiry_date, stock.impact_expiry_date].filter(Boolean) as string[];
-        return expiries.some((expiry) => {
-          const days = Math.ceil((new Date(expiry).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-          return days >= 0 && days <= 120;
-        });
-      }).length;
+    return { aaa: bucket("AAA"), aaaCp: bucket("AAA/CP") };
+  }, [sales, stocks]);
 
-      return {
-        cert,
-        totalKg,
-        declaredKg,
-        balanceKg: totalKg - declaredKg,
-        lotCount: certLots.length,
-        expiringSoon,
-        holders: Object.entries(holders).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 6),
-      };
+  const trackerVisibleStocks = useMemo(() => {
+    return stocks
+      .filter((stock) => matchesTrackerCert(stock, trackerCert))
+      .filter((stock) => (trackerDateStartFilter || trackerDateEndFilter ? isWithinDateRange(stock.recorded_date, trackerDateStartFilter, trackerDateEndFilter) : true));
+  }, [stocks, trackerCert, trackerDateStartFilter, trackerDateEndFilter]);
+
+  const trackerTableColumns = useMemo(() => getTrackerColumns(trackerCert, unit), [trackerCert, unit]);
+
+  const trackerHolderRows = useMemo(() => {
+    const holders = trackerVisibleStocks.reduce<Record<string, number>>((acc, stock) => {
+      const holder = getTrackerHolderLabel(stock, trackerCert);
+      acc[holder] = (acc[holder] || 0) + asNumber(stock.purchased_weight);
+      return acc;
+    }, {});
+
+    return (Object.entries(holders) as [string, number][])
+      .map(([name, value]) => ({ name, value: asNumber(value) }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6);
+  }, [trackerVisibleStocks, trackerCert]);
+
+  const trackerExpirySummary = useMemo(() => {
+    const result = {
+      totalWithExpiry: 0,
+      expired: 0,
+      within7: 0,
+      within30: 0,
+      within60: 0,
+      within90: 0,
+      within120: 0,
+      noExpiry: 0,
+      nextExpiryLabel: "—",
+      nextExpiryDays: null as number | null,
+      nextExpiryLot: "—",
+      averageDays: null as number | null,
+    };
+
+    let totalDays = 0;
+
+    trackerVisibleStocks.forEach((stock) => {
+      const expiryInfo = getTrackerDisplayedExpiry(stock, trackerCert);
+      if (expiryInfo.days === null) {
+        result.noExpiry += 1;
+        return;
+      }
+      result.totalWithExpiry += 1;
+      totalDays += expiryInfo.days;
+      if (expiryInfo.days < 0) result.expired += 1;
+      else if (expiryInfo.days <= 7) result.within7 += 1;
+      else if (expiryInfo.days <= 30) result.within30 += 1;
+      else if (expiryInfo.days <= 60) result.within60 += 1;
+      else if (expiryInfo.days <= 90) result.within90 += 1;
+      else if (expiryInfo.days <= 120) result.within120 += 1;
+
+      if (result.nextExpiryDays === null || expiryInfo.days < result.nextExpiryDays) {
+        result.nextExpiryDays = expiryInfo.days;
+        result.nextExpiryLabel = expiryInfo.label;
+        result.nextExpiryLot = displayText(stock.lot_number);
+      }
     });
-  }, [stocks]);
 
-  const trackerSelected = useMemo(() => trackerRows.find((item) => item.cert === trackerCert) ?? trackerRows[0], [trackerRows, trackerCert]);
+    if (result.totalWithExpiry > 0) {
+      result.averageDays = Number((totalDays / result.totalWithExpiry).toFixed(1));
+    }
+
+    return result;
+  }, [trackerVisibleStocks, trackerCert]);
+
+  const trackerVisibleTotalKg = useMemo(
+    () => trackerVisibleStocks.reduce((sum, stock) => sum + asNumber(stock.purchased_weight), 0),
+    [trackerVisibleStocks]
+  );
+
+  const trackerVisibleRecordCount = trackerVisibleStocks.length;
+  const trackerVisibleDateLabel = formatRangeLabel(trackerDateStartFilter, trackerDateEndFilter);
+
+  const trackerSelectedLabel = trackerCert === "ALL" ? "All certifications" : trackerCert;
+
+  const trackerVisibleRows = useMemo(() => trackerVisibleStocks.map((stock) => buildTrackerRow(stock, trackerCert)), [trackerVisibleStocks, trackerCert]);
 
   const visibleBlends = useMemo(() => {
+
     const q = blendSearch.trim().toLowerCase();
     return blends.map((blend) => ({ blend, composition: getBlendCompositionRow(blend), linkedContracts: sales.filter((sale) => Number(sale.blend_id) === blend.id) }))
       .filter(({ blend }) => !q || [blend.name, blend.client, blend.grade, blend.cup_profile, blend.blend_no].filter(Boolean).join(" ").toLowerCase().includes(q));
@@ -609,26 +1163,16 @@ export default function Page() {
       setPhysicalLoading(true);
       const res = await fetch("/api/physical_stock_position", { cache: "no-store" });
       if (!res.ok) throw new Error("Physical position fetch failed");
+
       const data = await res.json();
-      const rawRows = safeRows(data);
-      if (rawRows.length > 0) {
-        const rows: PhysicalRow[] = rawRows.map((row: any) => ({
-          stack: String(row.stack ?? row.position ?? row.strategy ?? "unassigned"),
-          theoretical: asNumber(row.theoretical ?? row.theoretical_volume ?? row.available ?? row.volume ?? row.stock ?? 0),
-          months: MONTH_ORDER.reduce((acc, month) => ({ ...acc, [month]: asNumber(row.months?.[month] ?? row[month] ?? row.shipmentsByMonth?.[month] ?? 0) }), {} as Record<string, number>),
-          shorts: asNumber(row.shorts ?? row.total_shorts ?? row.totalShorts ?? 0),
-          net: asNumber(row.net ?? row.net_position ?? row.netPosition ?? 0),
-        }));
-        const months = Array.isArray(data?.months) && data.months.length ? data.months : [...MONTH_ORDER];
-        const kpis = data?.kpis ? { totalTheoretical: asNumber(data.kpis.totalTheoretical), totalShorts: asNumber(data.kpis.totalShorts), totalNet: asNumber(data.kpis.totalNet) } : buildPhysicalData(rows).kpis;
-        setPhysicalData({ gridData: rows, months, kpis });
-      } else {
-        setPhysicalData(buildPhysicalData(SAMPLE_PHYSICAL));
-      }
+      const normalized = normalizePhysicalPayload(data);
+      setPhysicalData(normalized);
+      setHasFetchedPhysical(true);
       showToast("Physical positions refreshed.", "success");
-    } catch {
-      setPhysicalData(buildPhysicalData(SAMPLE_PHYSICAL));
-      showToast("Physical refresh fell back to sample data.", "error");
+    } catch (error) {
+      console.error("Error fetching physical positions:", error);
+      setHasFetchedPhysical(true);
+      showToast("Unable to refresh physical positions.", "error");
     } finally {
       setPhysicalLoading(false);
     }
@@ -747,21 +1291,38 @@ export default function Page() {
   async function deleteBlend(blendId: number) {
     const linked = sales.filter((sale) => Number(sale.blend_id) === blendId);
     try {
-      if (linked.length > 0) {
-        await Promise.all(linked.map((sale) => updateContractBlend(sale.id, null)));
-      }
-      const previous = blends;
+      await Promise.allSettled(
+        linked.map(async (sale) => {
+          try {
+            await updateContractBlend(sale.id, null);
+          } catch (error) {
+            console.warn("Unable to unlink contract from deleted blend:", sale.id, error);
+          }
+        })
+      );
+
       setBlends((prev) => prev.filter((blend) => blend.id !== blendId));
       if (selectedBlendId === blendId) setSelectedBlendId(null);
       setSales((prev) => prev.map((sale) => (Number(sale.blend_id) === blendId ? { ...sale, blend_id: null, blend_name: null } : sale)));
-      const response = await fetch("/api/blends", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: blendId }),
-      });
-      if (!response.ok && ![404, 405].includes(response.status)) throw new Error("Delete failed");
+
+      try {
+        const response = await fetch("/api/blends", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: blendId }),
+        });
+
+        if (!response.ok && ![404, 405].includes(response.status)) {
+          const detail = await response.text().catch(() => "");
+          console.warn("Blend delete API returned a non-success status after local removal:", response.status, detail);
+        }
+      } catch (error) {
+        console.warn("Blend delete API request failed after local removal:", error);
+      }
+
       showToast("Blend deleted.", "success");
-    } catch {
+    } catch (error) {
+      console.error("Delete blend failed:", error);
       showToast("Failed to delete blend.", "error");
     }
   }
@@ -771,106 +1332,30 @@ export default function Page() {
     setUploadOpen(true);
   }
 
-  function exportCurrentView(format: "csv" | "excel") {
-    let rows: Record<string, any>[] = [];
-    let title = "positions";
-
-    if (activeTab === "physical") {
-      title = "physical";
-      rows = physicalRows.gridData.map((row) => ({
-        Stack: stackLabel(row.stack),
-        Theoretical: row.theoretical,
-        ...Object.fromEntries(MONTH_ORDER.map((m) => [m, row.months[m] ?? 0])),
-        Shorts: row.shorts,
-        Net: row.net,
-      }));
-    }
-
-    if (activeTab === "certification") {
-      title = `certification-${activeCert}`;
-      rows = certificationRows.tableData.map((row) => ({
-        Strategy: row.strategy,
-        Available: row.available,
-        ...Object.fromEntries(certificationRows.months.map((m) => [m, row.shipmentsByMonth[m] || 0])),
-        ShipmentTotal: row.totalShipment,
-        NetPosition: row.netPosition,
-        LinkedLots: row.linkedLots,
-        LinkedContracts: row.linkedContracts,
-        Tags: row.tags.join(" | "),
-      }));
-    }
-
-    if (activeTab === "tracker") {
-      title = `tracker-${trackerCert}`;
-      rows = trackerRows.map((row) => ({
-        Cert: row.cert,
-        TotalKg: row.totalKg,
-        DeclaredKg: row.declaredKg,
-        BalanceKg: row.balanceKg,
-        LotCount: row.lotCount,
-        ExpiringSoon: row.expiringSoon,
-        Coverage: row.totalKg > 0 ? ((row.declaredKg / row.totalKg) * 100).toFixed(1) : "0.0",
-        Holders: row.holders.map((h) => `${h.name}: ${h.value}`).join(" | "),
-      }));
-    }
-
-    if (activeTab === "contracts") {
-      title = "contracts";
-      rows = sales.map((sale) => ({
-        Contract: sale.contract_number,
-        Client: sale.client || "",
-        WeightKg: sale.weight_kilos,
-        ShipDate: sale.shipping_date,
-        Quality: sale.quality || sale.strategy || "",
-        Grade: sale.grade || "",
-        Certifications: parseCerts(sale.certifications).join(" | "),
-        Blend: sale.blend_name || "",
-      }));
-    }
-
-    if (activeTab === "blends") {
-      title = "blends";
-      rows = visibleBlends.map(({ blend, composition, linkedContracts }) => ({
-        Name: blend.name,
-        Client: blend.client || "",
-        BlendNo: blend.blend_no || "",
-        Grade: blend.grade || "",
-        CupProfile: blend.cup_profile || "",
-        Composition: composition.map((c) => `${c.label}: ${c.value}%`).join(" | "),
-        CompositionTotal: composition.reduce((s, c) => s + c.value, 0),
-        LinkedContracts: linkedContracts.length,
-      }));
-    }
-
-    if (format === "csv") {
-      const csv = toCsv(rows);
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${title}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast("CSV download started.", "success");
-      return;
-    }
-
-    const html = toExcelHtml(title, rows);
-    const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8;" });
+  function downloadTrackerView(format: "csv" | "excel") {
+    const columns = getTrackerColumns(trackerCert, unit);
+    const rows = getTrackerExportRows(trackerVisibleRows, columns);
+    const rangeSlug = [trackerDateStartFilter || "start", trackerDateEndFilter || "end"].filter(Boolean).join("-");
+    const title = `certified-stock-tracker-${trackerSelectedLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}${trackerDateStartFilter || trackerDateEndFilter ? `-${rangeSlug}` : ""}`;
+    const downloadTitle = title.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+    const filename = format === "csv" ? `${downloadTitle}.csv` : `${downloadTitle}.xls`;
+    const blob = format === "csv"
+      ? new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8;" })
+      : new Blob([toExcelHtml(`Certified Stock Tracker - ${trackerSelectedLabel}`, rows)], { type: "application/vnd.ms-excel;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${title}.xls`;
+    a.download = filename || `certified-stock-tracker.${format}`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast("Excel download started.", "success");
+    setDownloadOpen(false);
+    showToast(`Tracker ${format.toUpperCase()} download started.`, "success");
   }
 
   if (loading) {
     return <div className={`${poppins.className} min-h-screen bg-[#D6D2C4] flex items-center justify-center text-[#51534a] font-bold`}>Loading position data…</div>;
   }
 
-  const trackerCoverage = trackerSelected?.totalKg ? ((trackerSelected.declaredKg / Math.max(1, trackerSelected.totalKg)) * 100).toFixed(1) : "0.0";
 
   return (
     <main className={`${poppins.className} min-h-screen bg-[#D6D2C4] text-[#51534a]`}>
@@ -981,19 +1466,16 @@ export default function Page() {
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#007680] text-white shadow-sm"><ShieldCheck size={20} /></div>
               <div>
                 <h1 className="text-2xl font-bold text-[#51534a]">Positions</h1>
+                <p className="text-sm text-[#968C83]">Physical, Certification, Certification Tracker, Contracts, and Blends</p>
               </div>
             </div>
           </div>
 
-          <div className="relative flex flex-wrap items-center gap-3" ref={downloadWrapRef}>
+          <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center rounded-lg border border-[#968C83]/20 bg-white p-1 shadow-sm">
               {(["kg", "bag", "mt"] as Unit[]).map((u) => (
                 <button key={u} onClick={() => setUnit(u)} className={`rounded-md px-4 py-1.5 text-sm font-medium transition-all ${unit === u ? "bg-[#007680] text-white shadow-sm" : "text-[#968C83] hover:bg-[#D6D2C4]/30"}`}>{u.toUpperCase()}</button>
               ))}
-            </div>
-            <div className="relative">
-              <button onClick={() => setDownloadOpen((prev) => !prev)} className="flex items-center gap-2 rounded-lg border border-[#968C83]/20 bg-white px-4 py-2 text-sm font-bold text-[#51534a] shadow-sm hover:bg-[#F5F5F3]"><Download size={16} /> Download</button>
-              <ExportMenu open={downloadOpen} onDownload={exportCurrentView} />
             </div>
             <button onClick={() => openAddUpload("purchases")} className="flex items-center gap-2 rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm"><Upload size={16} /> Add / Upload</button>
           </div>
@@ -1007,19 +1489,23 @@ export default function Page() {
           <button onClick={() => setActiveTab("blends")} className={`flex items-center gap-2 whitespace-nowrap border-b-4 px-4 py-3 text-sm font-medium transition-colors ${activeTab === "blends" ? "border-[#007680] text-[#007680]" : "border-transparent text-[#968C83] hover:border-[#968C83]/30 hover:text-[#51534a]"}`}><Combine size={16} /> Blends</button>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-4">
-          <MetricCard title={activeTab === "certification" ? `${activeCert} Total Stock` : activeTab === "physical" ? "Physical Theoretical Stock" : activeTab === "tracker" ? `${trackerCert} Stock Position` : "Total Sales"} value={activeTab === "certification" ? formatQty(certificationRows.kpis.stock, unit) : activeTab === "physical" ? formatQty(physicalRows.kpis.totalTheoretical, unit) : activeTab === "tracker" ? formatQty(trackerSelected?.totalKg ?? 0, unit) : formatQty(sales.reduce((s, sale) => s + asNumber(sale.weight_kilos), 0), unit)} subtitle="Displayed in selected unit" />
-          <MetricCard title={activeTab === "certification" ? `${activeCert} Shorts` : activeTab === "physical" ? "Physical Shorts" : activeTab === "tracker" ? `${trackerCert} Coverage` : "Linked Blends"} value={activeTab === "certification" ? formatQty(certificationRows.kpis.shorts, unit) : activeTab === "physical" ? formatQty(physicalRows.kpis.totalShorts, unit) : activeTab === "tracker" ? trackerCoverage + "%" : String(sales.filter((s) => s.blend_id).length)} tone={activeTab === "certification" || activeTab === "physical" ? "warn" : "default"} subtitle="Filtered from current view" />
-          <MetricCard title={activeTab === "certification" ? `${activeCert} Net Position` : activeTab === "physical" ? "Physical Net Position" : activeTab === "tracker" ? `${trackerCert} Focused Balance` : "Open Contracts"} value={activeTab === "certification" ? formatQty(certificationRows.kpis.net, unit) : activeTab === "physical" ? formatQty(physicalRows.kpis.totalNet, unit) : activeTab === "tracker" ? formatQty(trackerSelected?.balanceKg ?? 0, unit) : String(sales.filter((s) => !s.blend_id).length)} tone="good" subtitle="Positive or negative balance" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
+          <MetricCard title={activeTab === "certification" ? `${activeCert} Total Stock` : activeTab === "physical" ? "Physical Theoretical Stock" : activeTab === "tracker" ? "Active Certification" : "Total Sales"} value={activeTab === "certification" ? formatQty(certificationRows.kpis.stock, unit) : activeTab === "physical" ? formatQty(physicalRows.kpis.totalTheoretical, unit) : activeTab === "tracker" ? trackerSelectedLabel : formatQty(sales.reduce((s, sale) => s + asNumber(sale.weight_kilos), 0), unit)} subtitle={activeTab === "tracker" ? "Applies to tracker table and download" : "Displayed in selected unit"} />
+          <MetricCard title={activeTab === "certification" ? `${activeCert} Shorts` : activeTab === "physical" ? "Physical Shorts" : activeTab === "tracker" ? "Visible Records" : "Linked Blends"} value={activeTab === "certification" ? formatQty(certificationRows.kpis.shorts, unit) : activeTab === "physical" ? formatQty(physicalRows.kpis.totalShorts, unit) : activeTab === "tracker" ? String(trackerVisibleRecordCount) : String(sales.filter((s) => s.blend_id).length)} tone={activeTab === "certification" || activeTab === "physical" ? "warn" : "default"} subtitle={activeTab === "tracker" ? trackerVisibleDateLabel : "Filtered from current view"} />
+          <MetricCard title={activeTab === "certification" ? `${activeCert} Net Position` : activeTab === "physical" ? "Physical Net Position" : activeTab === "tracker" ? "Visible Volume" : "Open Contracts"} value={activeTab === "certification" ? formatQty(certificationRows.kpis.net, unit) : activeTab === "physical" ? formatQty(physicalRows.kpis.totalNet, unit) : activeTab === "tracker" ? formatQty(trackerVisibleTotalKg, unit) : String(sales.filter((s) => !s.blend_id).length)} tone="good" subtitle={activeTab === "tracker" ? "Current filtered tracker stock" : "Positive or negative balance"} />
           <MetricCard title="Current Unit" value={unitText(unit)} subtitle="Applies across the page" />
         </div>
 
         {activeTab === "physical" && (
-          <div className="grid gap-5 xl:grid-cols-[1.35fr_0.65fr]">
+          <div className="grid min-w-0 gap-5 xl:grid-cols-[1.35fr_0.65fr]">
             <SectionCard title="Physical Stock Position" subtitle="Theoretical, shorts, and net balances" right={<button onClick={refreshPhysical} disabled={physicalLoading} className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50">{physicalLoading ? "Refreshing..." : "Refresh Physical"}</button>}>
-              {physicalRows.gridData.length === 0 ? (
+              {!hasFetchedPhysical && physicalRows.gridData.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-[#D6D2C4] bg-[#F5F5F3] p-10 text-center text-sm text-[#968C83]">
                   No physical stock position has been loaded yet. Click Refresh Physical to fetch the current data.
+                </div>
+              ) : physicalRows.gridData.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-[#D6D2C4] bg-[#F5F5F3] p-10 text-center text-sm text-[#968C83]">
+                  No physical rows were returned by the data source.
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -1038,7 +1524,7 @@ export default function Page() {
                         <tr key={row.stack} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA]"}>
                           <td className="px-4 py-3 font-medium text-[#007680]">{stackLabel(row.stack)}</td>
                           <td className="px-4 py-3 text-right font-bold">{formatQty(row.theoretical, unit)}</td>
-                          {physicalRows.months.map((m) => <td key={m} className="px-4 py-3 text-right text-[#968C83]">{row.months[m] ? formatQty(row.months[m], unit) : "-"}</td>)}
+                          {physicalRows.months.map((m) => <td key={m} className="px-4 py-3 text-right text-[#968C83]">{row.months[m] != null ? formatQty(row.months[m], unit) : "-"}</td>)}
                           <td className="px-4 py-3 text-right font-medium text-[#5B3427]">{formatQty(row.shorts, unit)}</td>
                           <td className={`px-4 py-3 text-right font-bold ${row.net >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{row.net > 0 ? "+" : ""}{formatQty(row.net, unit)}</td>
                         </tr>
@@ -1048,7 +1534,7 @@ export default function Page() {
                       <tr>
                         <td className="px-4 py-3">TOTALS</td>
                         <td className="px-4 py-3 text-right">{formatQty(physicalRows.kpis.totalTheoretical, unit)}</td>
-                        {physicalRows.months.map((m) => <td key={m} className="px-4 py-3 text-right">{formatQty(physicalRows.gridData.reduce((s, r) => s + (r.months[m] || 0), 0), unit)}</td>)}
+                        {physicalRows.months.map((m) => <td key={m} className="px-4 py-3 text-right">{formatQty(physicalRows.gridData.reduce((s, r) => s + (r.months[m] ?? 0), 0), unit)}</td>)}
                         <td className="px-4 py-3 text-right">{formatQty(physicalRows.kpis.totalShorts, unit)}</td>
                         <td className={`px-4 py-3 text-right ${physicalRows.kpis.totalNet >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{physicalRows.kpis.totalNet > 0 ? "+" : ""}{formatQty(physicalRows.kpis.totalNet, unit)}</td>
                       </tr>
@@ -1058,7 +1544,7 @@ export default function Page() {
               )}
             </SectionCard>
 
-            <div className="space-y-4">
+            <div className="space-y-4 min-w-0">
               <SectionCard title="Physical Insights" subtitle="Quick operational readout">
                 <div className="space-y-3 text-sm text-[#51534a]">
                   <div className="flex justify-between"><span>Largest stack</span><span className="font-bold">{physicalTop?.stack ? stackLabel(physicalTop.stack) : "—"}</span></div>
@@ -1068,7 +1554,7 @@ export default function Page() {
                 </div>
               </SectionCard>
               <SectionCard title="Physical Data Status" subtitle="Refresh is safe against bad API shapes">
-                <div className="text-sm leading-6 text-[#968C83]">The refresh flow normalizes values and falls back to sample data if the API response is incomplete or uses unexpected field types, preventing NaN issues on reload.</div>
+                <div className="text-sm leading-6 text-[#968C83]">The refresh flow normalizes values and only uses the data returned by the API, avoiding NaN issues and avoiding fallback sample values unless the endpoint is unavailable.</div>
               </SectionCard>
             </div>
           </div>
@@ -1085,6 +1571,22 @@ export default function Page() {
                 <MetricCard title="Net Position" value={formatQty(certificationRows.kpis.net, unit)} tone="good" subtitle="Stock minus linked sales" />
                 <MetricCard title="Coverage" value={certificationRows.kpis.stock > 0 ? `${((certificationRows.kpis.shorts / certificationRows.kpis.stock) * 100).toFixed(1)}%` : "0.0%"} subtitle="Sales as a share of stock" />
               </div>
+              {activeCert === "AAA" && aaaAllocationSummary ? (
+                <div className="mb-5 grid gap-3 sm:grid-cols-2">
+                  {([aaaAllocationSummary.aaa, aaaAllocationSummary.aaaCp] as const).map((bucket) => (
+                    <div key={bucket.label} className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">{bucket.label} allocation</div>
+                      <div className="mt-2 text-2xl font-bold text-[#51534a]">{formatQty(bucket.lotKg, unit)} {unitText(unit)}</div>
+                      <div className="mt-2 space-y-1 text-xs text-[#51534a]">
+                        <div className="flex justify-between gap-2"><span>Stock lots</span><span className="font-bold">{bucket.lotCount}</span></div>
+                        <div className="flex justify-between gap-2"><span>Linked contracts</span><span className="font-bold">{bucket.contractCount}</span></div>
+                        <div className="flex justify-between gap-2"><span>Declared</span><span className="font-bold">{formatQty(bucket.declaredKg, unit)} {unitText(unit)}</span></div>
+                        <div className="flex justify-between gap-2"><span>Balance</span><span className="font-bold">{bucket.balanceKg >= 0 ? "+" : ""}{formatQty(bucket.balanceKg, unit)} {unitText(unit)}</span></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
 
               <div className="overflow-x-auto">
                 <table className="min-w-[1150px] w-full text-sm">
@@ -1102,7 +1604,7 @@ export default function Page() {
                       <tr key={row.strategy} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA]"}>
                         <td className="px-4 py-3 font-medium text-[#007680]"><span className="inline-flex items-center gap-2"><ChevronRight size={14} className="text-[#968C83]" />{row.strategy}</span></td>
                         <td className="px-4 py-3 text-right font-bold">{formatQty(row.available, unit)}</td>
-                        {certificationRows.months.map((month) => <td key={month} className="px-4 py-3 text-right text-[#968C83]">{row.shipmentsByMonth[month] ? formatQty(row.shipmentsByMonth[month], unit) : "-"}</td>)}
+                        {certificationRows.months.map((month) => <td key={month} className="px-4 py-3 text-right text-[#968C83]">{row.shipmentsByMonth[month] != null ? formatQty(row.shipmentsByMonth[month], unit) : "-"}</td>)}
                         <td className="px-4 py-3 text-right font-medium text-[#5B3427]">{formatQty(row.totalShipment, unit)}</td>
                         <td className={`px-4 py-3 text-right font-bold ${row.netPosition >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{row.netPosition > 0 ? "+" : ""}{formatQty(row.netPosition, unit)}</td>
                       </tr>
@@ -1112,7 +1614,7 @@ export default function Page() {
                     <tr>
                       <td className="px-4 py-3">TOTALS</td>
                       <td className="px-4 py-3 text-right">{formatQty(certificationRows.kpis.stock, unit)}</td>
-                      {certificationRows.months.map((month) => <td key={month} className="px-4 py-3 text-right">{formatQty(certificationRows.tableData.reduce((sum, r) => sum + (r.shipmentsByMonth[month] || 0), 0), unit)}</td>)}
+                      {certificationRows.months.map((month) => <td key={month} className="px-4 py-3 text-right">{formatQty(certificationRows.tableData.reduce((sum, r) => sum + (r.shipmentsByMonth[month] ?? 0), 0), unit)}</td>)}
                       <td className="px-4 py-3 text-right">{formatQty(certificationRows.kpis.shorts, unit)}</td>
                       <td className={`px-4 py-3 text-right ${certificationRows.kpis.net >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{certificationRows.kpis.net > 0 ? "+" : ""}{formatQty(certificationRows.kpis.net, unit)}</td>
                     </tr>
@@ -1138,11 +1640,11 @@ export default function Page() {
                         <div className="flex items-center justify-between gap-2">
                           <div>
                             <div className="text-sm font-bold text-[#007680]">{lot.lot_number}</div>
-                            <div className="text-xs text-[#968C83]">{lot.cooperative || lot.strategy || "Unassigned"}</div>
+                            <div className="text-xs text-[#968C83]">{displayText(lot.cooperative || lot.strategy || lot.grade || lot.wet_mill || lot.outturn || "Unassigned")}</div>
                           </div>
                           <div className="text-xs font-bold text-[#51534a]">{formatQty(asNumber(lot.purchased_weight), unit)} {unitText(unit)}</div>
                         </div>
-                        <div className="mt-1 text-[11px] text-[#51534a]">Holder: <span className="font-semibold">{activeCert === "RFA" ? lot.rfa_certificate_holder || "—" : activeCert === "CAFE" ? lot.cafe_certificate_holder || "—" : activeCert === "EUDR" ? lot.eudr_certificate_holder || "—" : lot.cooperative || "—"}</span></div>
+                        <div className="mt-1 text-[11px] text-[#51534a]">Holder: <span className="font-semibold">{activeCert === "RFA" ? displayText(lot.rfa_certificate_holder || lot.cooperative || lot.wet_mill) : activeCert === "CAFE" ? displayText(lot.cafe_certificate_holder || lot.cooperative || lot.wet_mill) : activeCert === "EUDR" ? displayText(lot.eudr_certificate_holder || lot.cooperative || lot.wet_mill) : displayText(getAaaReservationLabelFromStock(lot) === "AAA/CP" ? (lot.cafe_certificate_holder || lot.cooperative || lot.wet_mill) : (lot.cooperative || lot.wet_mill))}</span>{activeCert === "AAA" ? <span className="ml-2 rounded-full bg-[#A4DBE8]/30 px-2 py-0.5 font-semibold text-[#007680]">{getAaaReservationLabelFromStock(lot)}</span> : null}</div>
                       </div>
                     )) : <div className="text-sm italic text-[#968C83]">No linked lots for this certification.</div>}
                   </div>
@@ -1156,7 +1658,7 @@ export default function Page() {
                         <div className="flex items-center justify-between gap-2">
                           <div>
                             <div className="text-sm font-bold text-[#007680]">{sale.contract_number}</div>
-                            <div className="text-xs text-[#968C83]">{sale.client || "No client"} · {sale.strategy || sale.quality || "Unassigned"}</div>
+                            <div className="text-xs text-[#968C83]">{displayText(sale.client, "No client")} · {displayText(sale.strategy || sale.quality || sale.grade || "Unassigned")}</div>
                           </div>
                           <div className="text-xs font-bold text-[#51534a]">{formatQty(asNumber(sale.weight_kilos), unit)} {unitText(unit)}</div>
                         </div>
@@ -1170,140 +1672,225 @@ export default function Page() {
         )}
 
         {activeTab === "tracker" && (
-          <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
-            <SectionCard title="Certification Tracker" subtitle="Position, coverage, and focused balance by certification">
-              <div className="mb-4 flex flex-wrap gap-2">{trackerRows.map((item) => <Chip key={item.cert} active={trackerCert === item.cert} onClick={() => setTrackerCert(item.cert)}>{item.cert}</Chip>)}</div>
+          <div className="space-y-5">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                <div>
+                  <div className="whitespace-nowrap text-sm font-bold text-[#51534a]">Certification:</div>
+                  <div className="mt-2 flex min-w-max flex-wrap gap-2">
+                    {TRACKER_FILTERS.map((cert) => (
+                      <Chip key={cert} active={trackerCert === cert} onClick={() => setTrackerCert(cert)}>
+                        {cert}
+                      </Chip>
+                    ))}
+                  </div>
+                </div>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                {trackerRows.map((item) => (
-                  <button key={item.cert} type="button" onClick={() => setTrackerCert(item.cert)} className={`text-left rounded-2xl border p-4 transition ${trackerCert === item.cert ? "border-[#007680] bg-[#EAF8FA]" : "border-slate-200 bg-white hover:border-[#007680]/30"}`}>
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-bold text-[#51534a]">{item.cert}</div>
-                      <div className="text-xs font-bold text-[#968C83]">{item.lotCount} lots</div>
-                    </div>
-                    <div className="mt-2 text-2xl font-bold text-[#007680]">{formatQty(item.totalKg, unit)}</div>
-                    <div className="mt-1 text-xs text-[#968C83]">Coverage {item.totalKg > 0 ? ((item.declaredKg / item.totalKg) * 100).toFixed(1) : "0.0"}%</div>
-                    <div className="mt-1 text-xs text-[#968C83]">Focused balance {formatQty(item.balanceKg, unit)}</div>
-                    <div className="mt-3 h-2 rounded-full bg-[#D6D2C4]"><div className="h-2 rounded-full bg-[#007680]" style={{ width: `${Math.min(100, item.totalKg ? (item.declaredKg / item.totalKg) * 100 : 0)}%` }} /></div>
+                <div className="flex flex-wrap items-end gap-2">
+                  <div>
+                    <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#968C83]">Date from</label>
+                    <input
+                      type="date"
+                      value={trackerDateStartDraft}
+                      onChange={(e) => setTrackerDateStartDraft(e.target.value)}
+                      className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#968C83]">Date to</label>
+                    <input
+                      type="date"
+                      value={trackerDateEndDraft}
+                      onChange={(e) => setTrackerDateEndDraft(e.target.value)}
+                      className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTrackerDateStartFilter(trackerDateStartDraft);
+                      setTrackerDateEndFilter(trackerDateEndDraft);
+                    }}
+                    disabled={!trackerDateStartDraft && !trackerDateEndDraft}
+                    className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50"
+                  >
+                    Apply Range
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTrackerDateStartDraft("");
+                      setTrackerDateEndDraft("");
+                      setTrackerDateStartFilter("");
+                      setTrackerDateEndFilter("");
+                    }}
+                    disabled={!trackerDateStartFilter && !trackerDateEndFilter}
+                    className="rounded-lg border border-[#D6D2C4] bg-white px-4 py-2 text-sm font-bold text-[#51534a] shadow-sm disabled:opacity-50"
+                  >
+                    Clear
+                  </button>
+                </div>
               </div>
-            </SectionCard>
+              <div className="mt-3 text-xs text-[#968C83]">
+                Showing {trackerVisibleRecordCount} record{trackerVisibleRecordCount === 1 ? "" : "s"} for {trackerSelectedLabel} · {trackerVisibleDateLabel}
+              </div>
+            </div>
 
-            <div className="space-y-4">
-              <SectionCard title={`${trackerSelected?.cert ?? trackerCert} Holder Concentration`} subtitle="Top certificate holders by selected certification">
-                <div className="space-y-3">
-                  {trackerSelected?.holders.length ? trackerSelected.holders.map((holder) => (
-                    <div key={holder.name} className="rounded-xl border border-[#D6D2C4] bg-[#F5F5F3] p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-bold text-[#51534a]">{holder.name}</div>
-                          <div className="text-[11px] text-[#968C83]">{formatQty(holder.value, unit)} {unitText(unit)}</div>
-                        </div>
-                        <div className="text-xs font-bold text-[#007680]">{trackerSelected?.totalKg ? ((holder.value / trackerSelected.totalKg) * 100).toFixed(1) : "0.0"}%</div>
-                      </div>
-                      <div className="mt-2 h-2 rounded-full bg-[#D6D2C4]"><div className="h-2 rounded-full bg-[#007680]" style={{ width: `${trackerSelected?.totalKg ? Math.min(100, (holder.value / trackerSelected.totalKg) * 100) : 0}%` }} /></div>
+            <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(420px,0.95fr)_minmax(0,1.05fr)]">
+              <div className="min-w-0 space-y-5">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-bold text-[#51534a]">Expiring Soon</div>
+                      <div className="mt-1 text-xs text-[#968C83]">Expiry status for the current tracker view</div>
                     </div>
-                  )) : <div className="text-sm italic text-[#968C83]">No holder data available.</div>}
-                </div>
-              </SectionCard>
+                    <div className="rounded-full bg-[#A4DBE8]/30 px-3 py-1 text-xs font-bold text-[#007680]">
+                      {trackerSelectedLabel}
+                    </div>
+                  </div>
 
-              <SectionCard title="Expiry and Coverage Overview" subtitle="Useful certification risk snapshot">
-                <div className="space-y-3">
-                  <div className="flex justify-between text-sm"><span>Total lots</span><span className="font-bold">{trackerSelected?.lotCount ?? 0}</span></div>
-                  <div className="flex justify-between text-sm"><span>Expiring in 120 days</span><span className="font-bold">{trackerSelected?.expiringSoon ?? 0}</span></div>
-                  <div className="flex justify-between text-sm"><span>Total certified volume</span><span className="font-bold">{formatQty(trackerSelected?.totalKg ?? 0, unit)} {unitText(unit)}</span></div>
-                  <div className="rounded-xl bg-[#EAF8FA] p-3 text-xs text-[#007680]">This tab carries the certificate-holder view, concentration bars, position, coverage, and focused balance.</div>
-                </div>
-              </SectionCard>
+                  <div className="mt-5 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+                    <div className="rounded-2xl bg-[#F5F5F3] p-4">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">Expiry counts</div>
+                      <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                        <div className="rounded-xl bg-white p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">Expired</div>
+                          <div className="mt-1 text-2xl font-bold text-[#B9975B]">{trackerExpirySummary.expired}</div>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">0-7 days</div>
+                          <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within7}</div>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">8-30 days</div>
+                          <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within30}</div>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">31-60 days</div>
+                          <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within60}</div>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">61-90 days</div>
+                          <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within90}</div>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">91-120 days</div>
+                          <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within120}</div>
+                        </div>
+                      </div>
+                    </div>
 
-              <SectionCard title="Certified Stock Tracker Data" subtitle="Full records from certified_stock_tracker">
-                <div className="mx-auto max-h-[340px] max-w-full overflow-auto rounded-xl border border-[#D6D2C4]">
-                  <table className="min-w-[1900px] w-full text-xs">
-                    <thead className="sticky top-0 bg-[#51534a] text-white">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Season</th>
-                        <th className="px-3 py-2 text-left">Sale Type</th>
-                        <th className="px-3 py-2 text-left">Outturn</th>
-                        <th className="px-3 py-2 text-left">Lot</th>
-                        <th className="px-3 py-2 text-left">Strategy</th>
-                        <th className="px-3 py-2 text-left">Cooperative</th>
-                        <th className="px-3 py-2 text-left">Wet Mill</th>
-                        <th className="px-3 py-2 text-left">County</th>
-                        <th className="px-3 py-2 text-left">Grade</th>
-                        <th className="px-3 py-2 text-left">Grower</th>
-                        <th className="px-3 py-2 text-right">Purchased</th>
-                        <th className="px-3 py-2 text-center">RFA</th>
-                        <th className="px-3 py-2 text-center">RFA Expiry</th>
-                        <th className="px-3 py-2 text-center">RFA Holder</th>
-                        <th className="px-3 py-2 text-right">RFA Decl.</th>
-                        <th className="px-3 py-2 text-center">EUDR</th>
-                        <th className="px-3 py-2 text-center">EUDR Expiry</th>
-                        <th className="px-3 py-2 text-center">EUDR Holder</th>
-                        <th className="px-3 py-2 text-right">EUDR Decl.</th>
-                        <th className="px-3 py-2 text-center">CAFE</th>
-                        <th className="px-3 py-2 text-center">CAFE Expiry</th>
-                        <th className="px-3 py-2 text-center">CAFE Holder</th>
-                        <th className="px-3 py-2 text-right">CAFE Decl.</th>
-                        <th className="px-3 py-2 text-center">Impact</th>
-                        <th className="px-3 py-2 text-center">Impact Expiry</th>
-                        <th className="px-3 py-2 text-right">Impact Decl.</th>
-                        <th className="px-3 py-2 text-center">AAA</th>
-                        <th className="px-3 py-2 text-right">AAA Vol.</th>
-                        <th className="px-3 py-2 text-center">Geo</th>
-                        <th className="px-3 py-2 text-right">AAA Decl.</th>
-                        <th className="px-3 py-2 text-center">Net Zero</th>
-                        <th className="px-3 py-2 text-right">Net Zero Decl.</th>
-                        <th className="px-3 py-2 text-center">Fully Declared</th>
-                        <th className="px-3 py-2 text-left">Recorded</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {stocks.map((row, idx) => (
-                        <tr key={row.id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA]"}>
-                          <td className="px-3 py-2">{row.season || "-"}</td>
-                          <td className="px-3 py-2">{row.sale_type || "-"}</td>
-                          <td className="px-3 py-2">{row.outturn || "-"}</td>
-                          <td className="px-3 py-2 font-bold text-[#007680]">{row.lot_number}</td>
-                          <td className="px-3 py-2">{row.strategy || "-"}</td>
-                          <td className="px-3 py-2">{row.cooperative || "-"}</td>
-                          <td className="px-3 py-2">{row.wet_mill || "-"}</td>
-                          <td className="px-3 py-2">{row.county || "-"}</td>
-                          <td className="px-3 py-2">{row.grade || "-"}</td>
-                          <td className="px-3 py-2">{row.grower_code || "-"}</td>
-                          <td className="px-3 py-2 text-right font-bold">{formatQty(asNumber(row.purchased_weight), unit)}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.rfa_certified) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2 text-center">{row.rfa_expiry_date || "-"}</td>
-                          <td className="px-3 py-2 text-center">{row.rfa_certificate_holder || "-"}</td>
-                          <td className="px-3 py-2 text-right">{row.rfa_declared_weight != null ? asNumber(row.rfa_declared_weight) : "-"}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.eudr_certified) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2 text-center">{row.eudr_expiry_date || "-"}</td>
-                          <td className="px-3 py-2 text-center">{row.eudr_certificate_holder || "-"}</td>
-                          <td className="px-3 py-2 text-right">{row.eudr_declared_weight != null ? asNumber(row.eudr_declared_weight) : "-"}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.cafe_certified) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2 text-center">{row.cafe_expiry_date || "-"}</td>
-                          <td className="px-3 py-2 text-center">{row.cafe_certificate_holder || "-"}</td>
-                          <td className="px-3 py-2 text-right">{row.cafe_declared_weight != null ? asNumber(row.cafe_declared_weight) : "-"}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.impact_certified) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2 text-center">{row.impact_expiry_date || "-"}</td>
-                          <td className="px-3 py-2 text-right">{row.impact_declared_weight != null ? asNumber(row.impact_declared_weight) : "-"}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.aaa_project) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2 text-right">{row.aaa_volume != null ? asNumber(row.aaa_volume) : "-"}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.geodata_available) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2 text-right">{row.aaa_declared_weight != null ? asNumber(row.aaa_declared_weight) : "-"}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.netzero_project) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2 text-right">{row.netzero_declared_weight != null ? asNumber(row.netzero_declared_weight) : "-"}</td>
-                          <td className="px-3 py-2 text-center">{bool(row.fully_declared) ? "Yes" : "No"}</td>
-                          <td className="px-3 py-2">{row.recorded_date || "-"}</td>
-                        </tr>
+                    <div className="space-y-3 rounded-2xl border border-[#D6D2C4] bg-[#FCF7EA] p-4 text-sm text-[#51534a]">
+                      <div className="flex justify-between gap-3"><span>Total lots in view</span><span className="font-bold">{trackerVisibleRecordCount}</span></div>
+                      <div className="flex justify-between gap-3"><span>Lots with expiry dates</span><span className="font-bold">{trackerExpirySummary.totalWithExpiry}</span></div>
+                      <div className="flex justify-between gap-3"><span>Lots without expiry</span><span className="font-bold">{trackerExpirySummary.noExpiry}</span></div>
+                      <div className="flex justify-between gap-3"><span>Next expiry lot</span><span className="font-bold">{trackerExpirySummary.nextExpiryLot}</span></div>
+                      <div className="flex justify-between gap-3"><span>Next expiry date</span><span className="font-bold">{trackerExpirySummary.nextExpiryLabel}</span></div>
+                      <div className="flex justify-between gap-3"><span>Next expiry status</span><span className="font-bold">{trackerExpirySummary.nextExpiryDays === null ? "—" : trackerExpirySummary.nextExpiryDays < 0 ? "Expired" : `${trackerExpirySummary.nextExpiryDays} days`}</span></div>
+                      <div className="flex justify-between gap-3"><span>Average expiry days</span><span className="font-bold">{trackerExpirySummary.averageDays === null ? "—" : `${trackerExpirySummary.averageDays} days`}</span></div>
+                      <div className="rounded-xl bg-white p-3 text-xs text-[#007680]">
+                        Use the certification chips to switch views, or clear the date range to view the full tracker again.
+                      </div>
+                      {trackerExpirySummary.totalWithExpiry === 0 ? (
+                        <div className="rounded-xl bg-white p-3 text-xs text-[#968C83]">
+                          No expiry dates are available for this view. AAA allocations are tracked separately from the certificate expiry fields.
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {trackerCert === "AAA" ? (
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                      {([aaaAllocationSummary.aaa, aaaAllocationSummary.aaaCp] as const).map((bucket) => (
+                        <div key={bucket.label} className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
+                          <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">{bucket.label}</div>
+                          <div className="mt-2 text-2xl font-bold text-[#51534a]">{formatQty(bucket.lotKg, unit)} {unitText(unit)}</div>
+                          <div className="mt-2 flex items-center justify-between text-xs text-[#51534a]"><span>Stock lots</span><span className="font-bold">{bucket.lotCount}</span></div>
+                          <div className="flex items-center justify-between text-xs text-[#51534a]"><span>Linked contracts</span><span className="font-bold">{bucket.contractCount}</span></div>
+                          <div className="flex items-center justify-between text-xs text-[#51534a]"><span>Declared</span><span className="font-bold">{formatQty(bucket.declaredKg, unit)} {unitText(unit)}</span></div>
+                          <div className="flex items-center justify-between text-xs text-[#51534a]"><span>Balance</span><span className={`font-bold ${bucket.balanceKg >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{bucket.balanceKg > 0 ? "+" : ""}{formatQty(bucket.balanceKg, unit)} {unitText(unit)}</span></div>
+                        </div>
                       ))}
-                    </tbody>
-                  </table>
+                    </div>
+                  ) : null}
+
+                  <div className="mt-5 space-y-3">
+                    <div className="text-xs font-bold uppercase tracking-wider text-[#968C83]">Holder concentration</div>
+                    <div className="space-y-3">
+                      {trackerHolderRows.length ? trackerHolderRows.map((holder) => (
+                        <div key={holder.name} className="rounded-xl border border-[#D6D2C4] bg-[#F5F5F3] p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-bold text-[#51534a]">{holder.name}</div>
+                              <div className="text-[11px] text-[#968C83]">{formatQty(holder.value, unit)} {unitText(unit)}</div>
+                            </div>
+                            <div className="text-xs font-bold text-[#007680]">{trackerVisibleTotalKg ? ((holder.value / trackerVisibleTotalKg) * 100).toFixed(1) : "0.0"}%</div>
+                          </div>
+                          <div className="mt-2 h-2 rounded-full bg-[#D6D2C4]"><div className="h-2 rounded-full bg-[#007680]" style={{ width: `${trackerVisibleTotalKg ? Math.min(100, (holder.value / trackerVisibleTotalKg) * 100) : 0}%` }} /></div>
+                        </div>
+                      )) : <div className="text-sm italic text-[#968C83]">No holder data available for this view.</div>}
+                    </div>
+                  </div>
                 </div>
-              </SectionCard>
+              </div>
+
+              <div className="min-w-0">
+                <SectionCard
+                  title="Certified Stock Tracker Data"
+                  subtitle={`Records currently visible for ${trackerSelectedLabel}${trackerDateStartFilter || trackerDateEndFilter ? ` · ${trackerVisibleDateLabel}` : ""}`}
+                  right={
+                    <div ref={downloadWrapRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setDownloadOpen((prev) => !prev)}
+                        className="flex items-center gap-2 rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm"
+                      >
+                        <Download size={16} /> Download
+                      </button>
+                      {downloadOpen ? (
+                        <div className="absolute right-0 top-full z-30 mt-2 w-44 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                          <button type="button" onClick={() => downloadTrackerView("csv")} className="w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-slate-700 transition hover:bg-slate-50">Download CSV</button>
+                          <button type="button" onClick={() => downloadTrackerView("excel")} className="w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-slate-700 transition hover:bg-slate-50">Download Excel</button>
+                        </div>
+                      ) : null}
+                    </div>
+                  }
+                >
+                  <div className="overflow-x-auto rounded-xl border border-[#D6D2C4]">
+                    <table className="min-w-[1400px] w-full text-xs">
+                      <thead className="sticky top-0 bg-[#51534a] text-white">
+                        <tr>
+                          {trackerTableColumns.map((column) => (
+                            <th key={column.key} className={`px-3 py-2 ${column.align === "right" ? "text-right" : column.align === "center" ? "text-center" : "text-left"}`}>{column.label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {trackerVisibleRows.length > 0 ? trackerVisibleRows.map((row, idx) => (
+                          <tr key={row.id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA]"}>
+                            {trackerTableColumns.map((column) => (
+                              <td key={column.key} className={`px-3 py-2 ${column.align === "right" ? "text-right" : column.align === "center" ? "text-center" : "text-left"}`}>
+                                {column.render(row)}
+                              </td>
+                            ))}
+                          </tr>
+                        )) : (
+                          <tr>
+                            <td colSpan={trackerTableColumns.length} className="px-3 py-8 text-center italic text-[#968C83]">
+                              No certified stock records match the selected certification or date range.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </SectionCard>
+              </div>
             </div>
           </div>
         )}
+
+
 
         {activeTab === "contracts" && (
           <SectionCard title="Contracts" subtitle="Edit certifications and blend allocations directly from the table" right={<button onClick={() => openAddUpload("sales")} className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm"><Plus size={16} className="mr-2 inline-block" />Add Sales</button>}>
@@ -1369,7 +1956,7 @@ export default function Page() {
 
         {activeTab === "blends" && (
           <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
-            <SectionCard title="Blend Directory" right={<button onClick={() => setBlendCreateOpen(true)} className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm"><Plus size={16} className="mr-2 inline-block" />Create Blend</button>}>
+            <SectionCard title="Blend Directory" subtitle="Only non-zero post stacks are shown in the summary" right={<button onClick={() => setBlendCreateOpen(true)} className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm"><Plus size={16} className="mr-2 inline-block" />Create Blend</button>}>
               <div className="relative mb-4">
                 <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
                 <input value={blendSearch} onChange={(e) => setBlendSearch(e.target.value)} placeholder="Search blends by name, client, grade, blend no." className="w-full rounded-lg border border-[#D6D2C4] bg-white py-2 pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-[#007680]" />
@@ -1450,7 +2037,7 @@ export default function Page() {
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <button onClick={() => selectedBlendData && deleteBlend(selectedBlendData.blend.id)} className="rounded-lg border border-red-300 px-4 py-2 text-sm font-bold text-red-600 hover:bg-red-50" disabled={selectedBlendData.linkedContracts.length > 0}>Delete Blend</button>
+                      <button type="button" onClick={() => selectedBlendData && deleteBlend(selectedBlendData.blend.id)} className="rounded-lg border border-red-300 px-4 py-2 text-sm font-bold text-red-600 hover:bg-red-50">Delete Blend</button>
                       <div className="flex items-center gap-2">
                         <select value={blendAllocContractId} onChange={(e) => setBlendAllocContractId(e.target.value ? Number(e.target.value) : "")} className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]">
                           <option value="">Select contract</option>
